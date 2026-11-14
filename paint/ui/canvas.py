@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRect, QRectF, QSizeF, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QGridLayout, QScrollBar, QWidget
 
 
 class Canvas(QWidget):
     MIN_ZOOM = 0.05
     MAX_ZOOM = 32.0
+    MARGIN = 32
 
     def __init__(self, app):
         super().__init__()
         self.app = app
+        self.host = None
         self.doc = None
         self.zoom = 1.0
         self.pan = QPointF(0, 0)
@@ -27,6 +29,7 @@ class Canvas(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAcceptDrops(True)
         self.setMinimumSize(240, 180)
         self._ants = QTimer(self)
         self._ants.setInterval(120)
@@ -91,7 +94,7 @@ class Canvas(QWidget):
     def fit(self) -> None:
         if self.doc is None:
             return
-        available = self.rect().adjusted(32, 32, -32, -32)
+        available = self.rect().adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
         if available.width() < 10 or available.height() < 10:
             return
         sx = available.width() / self.doc.size.width()
@@ -103,6 +106,16 @@ class Canvas(QWidget):
         )
         self._auto_fit = True
         self.app.update_zoom_label()
+        self._notify_view()
+        self.update()
+
+    def _notify_view(self) -> None:
+        if self.host is not None:
+            self.host.sync_bars()
+
+    def set_scroll_offset(self, x: int, y: int) -> None:
+        self.pan = QPointF(self.MARGIN - x, self.MARGIN - y)
+        self._auto_fit = False
         self.update()
 
     def set_zoom(self, zoom: float, anchor: QPointF | None = None) -> None:
@@ -118,6 +131,7 @@ class Canvas(QWidget):
                            self.pan.y() + anchor.y() - after.y())
         self._auto_fit = False
         self.app.update_zoom_label()
+        self._notify_view()
         self.update()
 
     def zoom_by(self, factor: float) -> None:
@@ -127,6 +141,8 @@ class Canvas(QWidget):
         super().resizeEvent(event)
         if self._auto_fit:
             self.fit()
+        else:
+            self._notify_view()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -229,10 +245,17 @@ class Canvas(QWidget):
         painter.drawEllipse(self._mouse, radius + 1, radius + 1)
 
     def _tick_ants(self) -> None:
-        if self.doc is None or not self.doc.has_selection():
+        doc = self.doc
+        if doc is None or not doc.has_selection():
             return
         self._ants_phase = (self._ants_phase + 1) % 10
-        self.update()
+        bounds = doc.selection.boundingRect()
+        if bounds.isEmpty():
+            self.update()
+            return
+        top_left = self.doc_to_view(QPointF(bounds.left(), bounds.top()))
+        bottom_right = self.doc_to_view(QPointF(bounds.right() + 1, bounds.bottom() + 1))
+        self.update(QRectF(top_left, bottom_right).toAlignedRect().adjusted(-4, -4, 4, 4))
 
     def _cursor_for_tool(self):
         if self._space:
@@ -283,6 +306,7 @@ class Canvas(QWidget):
             delta = event.position() - self._pan_start
             self.pan = QPointF(self._pan_origin.x() + delta.x(), self._pan_origin.y() + delta.y())
             self._auto_fit = False
+            self._notify_view()
             self.update()
             return
         tool = self.app.tool
@@ -320,6 +344,7 @@ class Canvas(QWidget):
             else:
                 self.pan = QPointF(self.pan.x(), self.pan.y() + step)
             self._auto_fit = False
+            self._notify_view()
             self.update()
         event.accept()
 
@@ -348,3 +373,84 @@ class Canvas(QWidget):
         self.roll_size()
         self.update()
         super().leaveEvent(event)
+
+    def dragEnterEvent(self, event) -> None:
+        if self.app.can_drop(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:
+        if self.app.can_drop(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        if self.app.can_drop(event.mimeData()):
+            self.app.drop_mime(event.mimeData())
+            event.acceptProposedAction()
+
+
+class CanvasHost(QWidget):
+    def __init__(self, canvas: Canvas, parent=None):
+        super().__init__(parent)
+        self.canvas = canvas
+        canvas.host = self
+        self.setAcceptDrops(True)
+        self._syncing = False
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(canvas, 0, 0)
+        self.vbar = QScrollBar(Qt.Vertical)
+        self.hbar = QScrollBar(Qt.Horizontal)
+        layout.addWidget(self.vbar, 0, 1)
+        layout.addWidget(self.hbar, 1, 0)
+        corner = QWidget()
+        corner.setFixedSize(self.vbar.sizeHint().width(), self.hbar.sizeHint().height())
+        layout.addWidget(corner, 1, 1)
+        self.hbar.valueChanged.connect(self._hbar_changed)
+        self.vbar.valueChanged.connect(self._vbar_changed)
+
+    def _hbar_changed(self, value: int) -> None:
+        if not self._syncing:
+            self.canvas.set_scroll_offset(value, self.vbar.value())
+
+    def _vbar_changed(self, value: int) -> None:
+        if not self._syncing:
+            self.canvas.set_scroll_offset(self.hbar.value(), value)
+
+    def sync_bars(self) -> None:
+        canvas = self.canvas
+        margin = canvas.MARGIN
+        self._syncing = True
+        if canvas.doc is None:
+            self.hbar.setRange(0, 0)
+            self.vbar.setRange(0, 0)
+            self._syncing = False
+            return
+        viewport_w = max(1, canvas.width())
+        viewport_h = max(1, canvas.height())
+        content_w = canvas.doc.size.width() * canvas.zoom
+        content_h = canvas.doc.size.height() * canvas.zoom
+        range_x = max(0, int(round(content_w + 2 * margin - viewport_w)))
+        range_y = max(0, int(round(content_h + 2 * margin - viewport_h)))
+        for bar, range_value, viewport, content, pan in (
+            (self.hbar, range_x, viewport_w, content_w, canvas.pan.x()),
+            (self.vbar, range_y, viewport_h, content_h, canvas.pan.y()),
+        ):
+            bar.setRange(0, range_value)
+            bar.setPageStep(max(1, viewport))
+            bar.setSingleStep(48)
+            bar.setEnabled(range_value > 0)
+            if range_value > 0:
+                bar.setValue(min(max(int(round(margin - pan)), 0), range_value))
+            else:
+                bar.setValue(0)
+        self._syncing = False
+
+    def dragEnterEvent(self, event) -> None:
+        if self.canvas.app.can_drop(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        if self.canvas.app.can_drop(event.mimeData()):
+            self.canvas.app.drop_mime(event.mimeData())
+            event.acceptProposedAction()

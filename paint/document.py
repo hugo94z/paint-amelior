@@ -10,6 +10,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPolygon,
     QRegion,
+    QTransform,
 )
 
 from .history import History, LayerCommand
@@ -23,6 +24,27 @@ BLEND = {
     "darken": QPainter.CompositionMode_Darken,
     "lighten": QPainter.CompositionMode_Lighten,
 }
+
+
+class ImageTransformCommand:
+    def __init__(self, label: str, layers, before, after, before_size: QSize, after_size: QSize):
+        self.label = label
+        self.layers = list(layers)
+        self.before = list(before)
+        self.after = list(after)
+        self.before_size = QSize(before_size)
+        self.after_size = QSize(after_size)
+
+    def nbytes(self) -> int:
+        return sum(image.sizeInBytes() for image in self.before) + sum(
+            image.sizeInBytes() for image in self.after
+        )
+
+    def restore(self, doc, use_before: bool) -> None:
+        images = self.before if use_before else self.after
+        for layer, image in zip(self.layers, images):
+            layer.image = image
+        doc.restore_image_state(self.before_size if use_before else self.after_size)
 
 
 class Document(QObject):
@@ -159,6 +181,24 @@ class Document(QObject):
         self.layers_changed.emit()
         self.invalidate_all()
 
+    def reorder_layers(self, ids_top_to_bottom: list[int]) -> None:
+        by_id = {layer.id: layer for layer in self.layers}
+        try:
+            new_top = [by_id[layer_id] for layer_id in ids_top_to_bottom]
+        except KeyError:
+            return
+        if len(new_top) != len(self.layers):
+            return
+        if [layer.id for layer in new_top] == [layer.id for layer in reversed(self.layers)]:
+            return
+        active = self.active_layer()
+        before = self._snapshot()
+        self.layers = list(reversed(new_top))
+        self.active_index = self.layers.index(active) if active in self.layers else 0
+        self.history.push(LayerCommand("Réorganisation des calques", before, self._snapshot()))
+        self.layers_changed.emit()
+        self.invalidate_all()
+
     def merge_down(self) -> None:
         index = self.active_index
         if index <= 0 or index >= len(self.layers):
@@ -203,10 +243,14 @@ class Document(QObject):
         painter = QPainter(self._cache)
         painter.setCompositionMode(QPainter.CompositionMode_Source)
         painter.fillRect(rect, Qt.transparent)
+        visible = [layer for layer in self.layers if layer.visible and layer.opacity > 0.0]
+        if (len(visible) == 1 and visible[0].blend == "normal"
+                and visible[0].opacity >= 0.999):
+            painter.drawImage(rect, visible[0].image, rect)
+            painter.end()
+            return
         first = True
-        for layer in self.layers:
-            if not layer.visible or layer.opacity <= 0.0:
-                continue
+        for layer in visible:
             painter.setOpacity(layer.opacity)
             mode = QPainter.CompositionMode_SourceOver if first else BLEND.get(
                 layer.blend, QPainter.CompositionMode_SourceOver
@@ -246,6 +290,16 @@ class Document(QObject):
         path.addRect(self.rect())
         self.set_selection(QRegion(self.rect()), path)
 
+    def invert_selection(self) -> None:
+        if not self.has_selection():
+            self.select_all()
+            return
+        region = QRegion(self.rect()).subtracted(self.selection)
+        outer = QPainterPath()
+        outer.addRect(self.rect())
+        path = outer.subtracted(self.selection_path) if self.selection_path is not None else None
+        self.set_selection(region, path)
+
     def clear_selection(self) -> None:
         self.set_selection(None)
 
@@ -263,6 +317,55 @@ class Document(QObject):
     def is_modified(self) -> bool:
         return self._modified
 
+    def _reset_cache(self) -> None:
+        self._cache = QImage(self._size, QImage.Format_ARGB32_Premultiplied)
+        self._cache.fill(Qt.transparent)
+
+    def restore_image_state(self, size: QSize) -> None:
+        self._size = QSize(size)
+        self.selection = None
+        self.selection_path = None
+        self.floating = None
+        self._reset_cache()
+        self.invalidate_all()
+        self.size_changed.emit()
+        self.selection_changed.emit()
+        self.layers_changed.emit()
+
+    def transform_image(self, angle: int = 0, flip_h: bool = False, flip_v: bool = False,
+                        label: str = "Transformation") -> None:
+        angle = int(angle) % 360
+        if not angle and not flip_h and not flip_v:
+            return
+        layers = list(self.layers)
+        if not layers:
+            return
+        before_images = [layer.image for layer in layers]
+        before_size = QSize(self._size)
+        after_images = []
+        for layer in layers:
+            image = layer.image
+            if flip_h or flip_v:
+                image = image.mirrored(flip_h, flip_v)
+            if angle:
+                image = image.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+            after_images.append(image.convertToFormat(QImage.Format_ARGB32_Premultiplied))
+        after_size = QSize(before_size.height(), before_size.width()) if angle % 180 else QSize(before_size)
+        self._size = after_size
+        for layer, image in zip(layers, after_images):
+            layer.image = image
+        self.selection = None
+        self.selection_path = None
+        self.floating = None
+        self._reset_cache()
+        self.history.push(ImageTransformCommand(label, layers, before_images, after_images,
+                                                before_size, after_size))
+        self.invalidate_all()
+        self.size_changed.emit()
+        self.selection_changed.emit()
+        self.layers_changed.emit()
+        self.mark_modified(True)
+
     def resize_image(self, width: int, height: int, smooth: bool = True) -> None:
         if width < 1 or height < 1:
             return
@@ -271,8 +374,7 @@ class Document(QObject):
         for layer in self.layers:
             layer.image = layer.image.scaled(width, height, Qt.IgnoreAspectRatio, mode)
             layer.image = layer.image.convertToFormat(QImage.Format_ARGB32_Premultiplied)
-        self._cache = QImage(self._size, QImage.Format_ARGB32_Premultiplied)
-        self._cache.fill(Qt.transparent)
+        self._reset_cache()
         self.selection = None
         self.selection_path = None
         self.floating = None

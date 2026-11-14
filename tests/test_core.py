@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QPointF, QRect, QSize
+from PySide6.QtCore import QPoint, QPointF, QRect, QSize
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QRegion
 
 from paint.brush import StampCache
@@ -45,6 +45,21 @@ class FakeApp:
 
     def notify(self, message):
         self.messages.append(message)
+
+
+class DummyEvent:
+    def __init__(self, shift: bool = False):
+        self._shift = shift
+
+    def modifiers(self):
+        from PySide6.QtCore import Qt
+
+        return Qt.ShiftModifier if self._shift else Qt.NoModifier
+
+    def buttons(self):
+        from PySide6.QtCore import Qt
+
+        return Qt.LeftButton
 
 
 def fill_layer(layer, rect, color):
@@ -179,3 +194,54 @@ def test_filters(qapp):
     assert doc.composite().pixelColor(10, 10) == QColor("cyan")
     doc.history.undo()
     assert doc.composite().pixelColor(10, 10) == QColor("red")
+
+
+def test_brush_shift_line(qapp):
+    doc = Document.new(140, 140, QColor("white"))
+    app = FakeApp(doc)
+    tool = BrushTool(app)
+    tool.size = 8
+    tool.press(QPointF(20, 20), DummyEvent())
+    tool.release(QPointF(20, 20), DummyEvent())
+    tool.press(QPointF(120, 20), DummyEvent(shift=True))
+    tool.release(QPointF(120, 20), DummyEvent(shift=True))
+    assert doc.composite().pixelColor(70, 20) == app.fg
+
+
+def test_transform_undo_redo(qapp):
+    doc = Document.new(90, 60, QColor("white"))
+    fill_layer(doc.active_layer(), QRect(5, 5, 10, 10), QColor("red"))
+    doc.invalidate_all()
+    doc.transform_image(90, label="Rotation")
+    assert doc.size == QSize(60, 90)
+    assert doc.history.can_undo
+    doc.history.undo()
+    assert doc.size == QSize(90, 60)
+    assert doc.composite().pixelColor(10, 10) == QColor("red")
+    doc.history.redo()
+    assert doc.size == QSize(60, 90)
+
+
+def test_invert_selection(qapp):
+    doc = Document.new(100, 80, QColor("white"))
+    path = QPainterPath()
+    path.addRect(QRect(10, 10, 30, 20))
+    doc.set_selection(QRegion(QRect(10, 10, 30, 20)), path)
+    doc.invert_selection()
+    assert doc.has_selection()
+    assert not doc.selection.contains(QPoint(15, 15))
+    assert doc.selection.contains(QPoint(2, 2))
+    assert doc.selection_path is not None
+
+
+def test_reorder_layers(qapp):
+    doc = Document.new(40, 40, QColor("white"))
+    doc.add_layer("Trois")
+    names_before = [layer.name for layer in doc.layers]
+    ids_top_to_bottom = [layer.id for layer in reversed(doc.layers)]
+    doc.reorder_layers(ids_top_to_bottom[1:] + ids_top_to_bottom[:1])
+    names_after = [layer.name for layer in doc.layers]
+    assert names_after != names_before
+    assert names_after[0] == names_before[-1]
+    doc.history.undo()
+    assert [layer.name for layer in doc.layers] == names_before

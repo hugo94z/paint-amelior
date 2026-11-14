@@ -23,6 +23,7 @@ class BrushTool(BaseTool):
         self._tx = None
         self._buffer: StrokeBuffer | None = None
         self._last: QPointF | None = None
+        self._anchor: QPointF | None = None
 
     def cursor_size(self) -> int:
         return self.size
@@ -37,7 +38,11 @@ class BrushTool(BaseTool):
         self._layer = layer
         self._tx = self.doc.history.begin("Gomme" if self.erase else "Pinceau")
         self._buffer = StrokeBuffer(self.doc.size)
-        self._last = None
+        if (self._anchor is not None and event is not None
+                and event.modifiers() & Qt.ShiftModifier):
+            self._last = self._anchor
+        else:
+            self._last = None
         self._paint_to(pos)
         self.app.canvas.update()
 
@@ -57,6 +62,7 @@ class BrushTool(BaseTool):
             r = self._buffer.stamp(stamp, point)
             rect = r if rect.isNull() else rect.united(r)
         self._last = pos
+        self._anchor = pos
         if not rect.isNull():
             self._tx.touch(self._layer, rect)
             self.app.canvas.update_doc_rect(rect)

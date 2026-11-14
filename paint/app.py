@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QThreadPool, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, QSettings, Qt, QThreadPool, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSpinBox,
     QToolBar,
@@ -41,7 +42,7 @@ from .io.project_io import load_project, save_project
 from .layer import Layer
 from .tools import build_tools
 from .tools.base import BaseTool
-from .ui.canvas import Canvas
+from .ui.canvas import Canvas, CanvasHost
 from .ui.docks import ColorDock, HistoryDock, LayersDock
 from .ui.icons import tool_icon
 from .ui.options_bar import OptionsBar
@@ -180,10 +181,15 @@ class ResizeDialog(QDialog):
 class MainWindow(QMainWindow):
     colors_changed = Signal()
     doc_changed = Signal()
+    DROP_SUFFIXES = {
+        ".paint", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif",
+    }
 
     def __init__(self, settings: Settings):
         super().__init__()
         self.settings = settings
+        self.qsettings = QSettings("PaintAmeliore", "PaintAmeliore")
+        self.recent_files = self._load_recent()
         self.stamp_cache = StampCache(settings.stamp_cache_bytes)
         self.fg = QColor("#111827")
         self.bg = QColor("#ffffff")
@@ -197,7 +203,9 @@ class MainWindow(QMainWindow):
         self.tool_actions: dict[str, QAction] = {}
         self._hooks = []
         self.canvas = Canvas(self)
-        self.setCentralWidget(self.canvas)
+        self.canvas_host = CanvasHost(self.canvas)
+        self.setCentralWidget(self.canvas_host)
+        self.setAcceptDrops(True)
         self._build_actions()
         self._build_menus()
         self._build_toolbars()
@@ -207,7 +215,9 @@ class MainWindow(QMainWindow):
         self.resize(1480, 940)
         self.setWindowIcon(tool_icon("brush", size=64))
         self._create_document(1600, 1000, QColor("#ffffff"))
-        self.set_tool("brush")
+        self._restore_session()
+        tool_id = str(self.qsettings.value("tool/last", "brush"))
+        self.set_tool(tool_id if tool_id in self.tools else "brush")
 
     def _action(self, text, slot, shortcut=None, checkable=False, icon=None) -> QAction:
         action = QAction(text, self)
@@ -236,8 +246,29 @@ class MainWindow(QMainWindow):
         self.action_delete = self._action("Effacer la sélection", self.delete_selection, "Del")
         self.action_select_all = self._action("Tout sélectionner", self.select_all, "Ctrl+A")
         self.action_deselect = self._action("Désélectionner", self.deselect, "Ctrl+D")
+        self.action_invert_selection = self._action(
+            "Inverser la sélection", self.invert_selection, "Ctrl+Shift+I"
+        )
+        self.action_swap_colors = self._action("Échanger les couleurs", self.swap_colors, "X")
 
         self.action_resize = self._action("Redimensionner l'image…", self.resize_dialog)
+        self.action_rotate_left = self._action(
+            "Pivoter 90° à gauche", lambda: self.transform_document(-90, label="Rotation à gauche")
+        )
+        self.action_rotate_right = self._action(
+            "Pivoter 90° à droite", lambda: self.transform_document(90, label="Rotation à droite")
+        )
+        self.action_rotate_180 = self._action(
+            "Pivoter 180°", lambda: self.transform_document(180, label="Rotation 180°")
+        )
+        self.action_flip_h = self._action(
+            "Miroir horizontal",
+            lambda: self.transform_document(0, flip_h=True, label="Miroir horizontal"),
+        )
+        self.action_flip_v = self._action(
+            "Miroir vertical",
+            lambda: self.transform_document(0, flip_v=True, label="Miroir vertical"),
+        )
         self.action_new_layer = self._action("Nouveau calque", self.new_layer, "Ctrl+Shift+N")
         self.action_duplicate_layer = self._action("Dupliquer le calque", self.duplicate_layer, "Ctrl+J")
         self.action_delete_layer = self._action("Supprimer le calque", self.delete_layer)
@@ -261,12 +292,17 @@ class MainWindow(QMainWindow):
         self.addAction(self.action_redo_alt)
         self.addAction(self.action_size_up)
         self.addAction(self.action_size_down)
+        self.addAction(self.action_swap_colors)
 
     def _build_menus(self) -> None:
         bar = self.menuBar()
         file_menu = bar.addMenu("&Fichier")
         for action in (self.action_new, self.action_open):
             file_menu.addAction(action)
+        self.recent_menu = QMenu("Documents récents", self)
+        file_menu.addMenu(self.recent_menu)
+        self._update_recent_menu()
+        file_menu.addSeparator()
         file_menu.addSeparator()
         for action in (self.action_save, self.action_save_as, self.action_export):
             file_menu.addAction(action)
@@ -282,9 +318,16 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_select_all)
         edit_menu.addAction(self.action_deselect)
+        edit_menu.addAction(self.action_invert_selection)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_swap_colors)
 
         image_menu = bar.addMenu("&Image")
         image_menu.addAction(self.action_resize)
+        image_menu.addSeparator()
+        for action in (self.action_rotate_left, self.action_rotate_right,
+                       self.action_rotate_180, self.action_flip_h, self.action_flip_v):
+            image_menu.addAction(action)
         image_menu.addSeparator()
         filters = [
             ("Flou gaussien…", self.filter_blur),
@@ -367,10 +410,16 @@ class MainWindow(QMainWindow):
     def _build_status(self) -> None:
         self.status_coords = QLabel("—")
         self.status_size = QLabel("—")
-        self.status_zoom = QLabel("100 %")
+        self.status_zoom = QComboBox()
+        self.status_zoom.setEditable(True)
+        self.status_zoom.setFixedWidth(96)
+        self.status_zoom.addItems(["25 %", "50 %", "75 %", "100 %", "150 %", "200 %", "400 %", "800 %"])
+        self.status_zoom.setCurrentText("100 %")
+        self.status_zoom.activated.connect(self._zoom_preset)
+        self.status_zoom.lineEdit().returnPressed.connect(self._zoom_typed)
         sep_style = "color:#4a4e56;"
-        for widget in (self.status_coords, self.status_size, self.status_zoom):
-            widget.setMinimumWidth(90)
+        self.status_coords.setMinimumWidth(90)
+        self.status_size.setMinimumWidth(90)
         self.statusBar().addWidget(self.status_coords)
         sep1 = QLabel("|")
         sep1.setStyleSheet(sep_style)
@@ -380,9 +429,26 @@ class MainWindow(QMainWindow):
         sep2.setStyleSheet(sep_style)
         self.statusBar().addWidget(sep2)
         self.statusBar().addWidget(self.status_zoom)
-        hint = QLabel("Ctrl+molette = zoom   •   Espace+glisser = déplacer")
+        hint = QLabel("Ctrl+molette = zoom   •   Espace+glisser = déplacer   •   glisser un fichier pour l'ouvrir")
         hint.setStyleSheet("color:#6f757f;")
         self.statusBar().addPermanentWidget(hint)
+
+    def _zoom_preset(self, index: int) -> None:
+        self._apply_zoom_text(self.status_zoom.itemText(index))
+
+    def _zoom_typed(self) -> None:
+        self._apply_zoom_text(self.status_zoom.currentText())
+
+    def _apply_zoom_text(self, text: str) -> None:
+        try:
+            value = float(str(text).replace("%", "").replace(",", ".").strip())
+        except ValueError:
+            self.update_zoom_label()
+            return
+        if value <= 0:
+            self.update_zoom_label()
+            return
+        self.canvas.set_zoom(value / 100.0)
 
     def set_document(self, doc: Document) -> None:
         if self.doc is not None:
@@ -397,6 +463,7 @@ class MainWindow(QMainWindow):
             (doc.layers_changed, self._on_layers_changed),
             (doc.history_changed, self._sync_history),
             (doc.modified_changed, self._update_title),
+            (doc.size_changed, self._on_size_changed),
         ]
         for signal, slot in self._hooks:
             signal.connect(slot)
@@ -410,6 +477,11 @@ class MainWindow(QMainWindow):
     def _on_layers_changed(self) -> None:
         self.doc_changed.emit()
         self.canvas.update()
+
+    def _on_size_changed(self) -> None:
+        if self.doc is not None:
+            self.status_size.setText(f"{self.doc.size.width()} × {self.doc.size.height()} px")
+            self.canvas.fit()
 
     def _sync_history(self) -> None:
         doc = self.doc
@@ -464,6 +536,7 @@ class MainWindow(QMainWindow):
             doc.invalidate_all()
             self.set_document(doc)
             self.canvas.fit()
+            self._add_recent(path)
             self.notify(f"Projet ouvert : {path.name}")
             return
         image = load_image(path)
@@ -482,6 +555,7 @@ class MainWindow(QMainWindow):
         doc.mark_modified(False)
         self.set_document(doc)
         self.canvas.fit()
+        self._add_recent(path)
         self.notify(f"Image ouverte : {path.name}")
 
     def _default_name(self, suffix: str) -> str:
@@ -517,6 +591,7 @@ class MainWindow(QMainWindow):
             doc.path = path
             doc.mark_modified(False)
             self._update_title()
+            self._add_recent(path)
             self.notify(f"Enregistré : {path.name}")
         else:
             QMessageBox.warning(self, APP_NAME, "Échec de l'enregistrement.")
@@ -566,9 +641,127 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.maybe_save():
+            self._save_session()
             event.accept()
         else:
             event.ignore()
+
+    def _load_recent(self) -> list[str]:
+        value = self.qsettings.value("files/recent", [])
+        if isinstance(value, str):
+            value = [value]
+        result = []
+        for item in value or []:
+            try:
+                path = Path(str(item))
+                if path.is_file() and str(path) not in result:
+                    result.append(str(path))
+            except OSError:
+                continue
+        return result[:8]
+
+    def _save_session(self) -> None:
+        self.qsettings.setValue("window/geometry", self.saveGeometry())
+        self.qsettings.setValue("window/state", self.saveState())
+        self.qsettings.setValue("tool/last", self.tool.id)
+        self.qsettings.setValue("colors/fg", self.fg.name(QColor.HexArgb))
+        self.qsettings.setValue("colors/bg", self.bg.name(QColor.HexArgb))
+        self.qsettings.setValue("files/recent", self.recent_files)
+
+    def _restore_session(self) -> None:
+        geometry = self.qsettings.value("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        state = self.qsettings.value("window/state")
+        if state is not None:
+            self.restoreState(state)
+        for key, attr in (("colors/fg", "fg"), ("colors/bg", "bg")):
+            stored = self.qsettings.value(key)
+            if stored:
+                color = QColor(str(stored))
+                if color.isValid():
+                    setattr(self, attr, color)
+        self._update_recent_menu()
+        self.colors_changed.emit()
+
+    def _update_recent_menu(self) -> None:
+        if not hasattr(self, "recent_menu"):
+            return
+        self.recent_menu.clear()
+        if not self.recent_files:
+            action = self.recent_menu.addAction("Aucun document récent")
+            action.setEnabled(False)
+            return
+        for path in self.recent_files:
+            action = self.recent_menu.addAction(Path(path).name)
+            action.setToolTip(path)
+            action.triggered.connect(lambda _=False, p=path: self.open_recent(p))
+        self.recent_menu.addSeparator()
+        clear = self.recent_menu.addAction("Effacer la liste")
+        clear.triggered.connect(self._clear_recent)
+
+    def _add_recent(self, path) -> None:
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            return
+        self.recent_files = [resolved] + [p for p in self.recent_files if p != resolved]
+        del self.recent_files[8:]
+        self.qsettings.setValue("files/recent", self.recent_files)
+        self._update_recent_menu()
+
+    def _remove_recent(self, path: str) -> None:
+        self.recent_files = [p for p in self.recent_files if p != path]
+        self.qsettings.setValue("files/recent", self.recent_files)
+        self._update_recent_menu()
+
+    def _clear_recent(self) -> None:
+        self.recent_files = []
+        self.qsettings.setValue("files/recent", self.recent_files)
+        self._update_recent_menu()
+
+    def open_recent(self, path: str) -> None:
+        target = Path(path)
+        if not target.is_file():
+            self._remove_recent(path)
+            self.notify("Fichier introuvable, entrée retirée")
+            return
+        if not self.maybe_save():
+            return
+        self.load_path(target)
+
+    def can_drop(self, mime) -> bool:
+        for url in mime.urls():
+            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in self.DROP_SUFFIXES:
+                return True
+        return False
+
+    def drop_mime(self, mime) -> None:
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.suffix.lower() in self.DROP_SUFFIXES:
+                if not self.maybe_save():
+                    return
+                self.load_path(path)
+                return
+
+    def transform_document(self, angle: int = 0, flip_h: bool = False, flip_v: bool = False,
+                           label: str = "Transformation") -> None:
+        if self.doc is None:
+            return
+        self.commit_floating()
+        self.doc.transform_image(angle, flip_h, flip_v, label)
+        self._on_size_changed()
+        self.notify("Transformation appliquée")
+
+    def invert_selection(self) -> None:
+        if self.doc is None:
+            return
+        self.doc.invert_selection()
+        self.canvas.update()
+        self.notify("Sélection inversée")
 
     def set_tool(self, tool_id: str) -> None:
         tool = self.tools.get(tool_id)
@@ -847,7 +1040,10 @@ class MainWindow(QMainWindow):
             self.status_coords.setText("—")
 
     def update_zoom_label(self) -> None:
-        self.status_zoom.setText(f"{self.canvas.zoom * 100:.0f} %")
+        text = f"{self.canvas.zoom * 100:.0f} %"
+        self.status_zoom.blockSignals(True)
+        self.status_zoom.setCurrentText(text)
+        self.status_zoom.blockSignals(False)
 
     def notify(self, message: str) -> None:
         self.statusBar().showMessage(message, 4000)

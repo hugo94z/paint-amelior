@@ -1,5 +1,7 @@
 # Paint Amélioré
 
+![tests](https://github.com/hugo94z/paint-amelior/actions/workflows/tests.yml/badge.svg)
+
 Clone de Paint réécrit en Python, avec PySide6 et numpy. Pensé pour être **plus rapide** qu'un Paint classique et **plus agréable** au quotidien : calques, sélection, filtres, zoom fluide, raccourcis clavier.
 
 ## Fonctionnalités
@@ -8,13 +10,14 @@ Clone de Paint réécrit en Python, avec PySide6 et numpy. Pensé pour être **p
 - **Pot de peinture** vectorisé numpy (remplissage par régions, tolérance réglable, respect de la sélection).
 - **Formes** : ligne, rectangle, ellipse, rectangle arrondi, polygone, dégradé linéaire/radial.
 - **Texte** avec police, taille, gras, italique, retour à la ligne automatique.
-- **Sélection** rectangle et lasso, déplacement des pixels, copier/couper/coller, effacement, fourmis animées.
-- **Calques** : ajout, duplication, suppression, réorganisation, fusion vers le bas, opacité, modes de fusion.
+- **Sélection** rectangle et lasso, déplacement des pixels, copier/couper/coller, effacement, inversion (`Ctrl+Maj+I`), fourmis animées.
+- **Calques** : ajout, duplication, suppression, réorganisation par glisser-déposer, fusion vers le bas, opacité, modes de fusion, vignettes.
 - **Filtres** : flou gaussien, netteté, luminosité, contraste, saturation, niveaux de gris, pixelisation, inversion.
 - **Historique par tuiles** avec budget mémoire configurable (annuler/rétablir illimité en pratique).
+- **Image** : redimensionnement, rotations 90°/180°, miroirs horizontal/vertical, avec annulation.
 - **Formats** : projet `.paint` non destructif (zip + PNG par calque) et export PNG/JPEG/WebP/BMP/TIFF.
-- **Zoom** 5 % à 3200 % centré sur le curseur, déplacement au clavier/souris, ajustement automatique.
-- Thème sombre, interface française, barre d'options contextuelle, palette et couleurs récentes.
+- **Zoom** 5 % à 3200 % centré sur le curseur, ascenseurs, déplacement au clavier/souris, ajustement automatique, sélecteur de zoom dans la barre d'état.
+- **Confort** : glisser-déposer un fichier image, documents récents, session mémorisée (fenêtre, docks, outil, couleurs), pinceau en ligne droite avec `Maj+clic`, thème sombre.
 
 ## Installation depuis GitHub
 
@@ -48,7 +51,7 @@ Processeur : AMD Ryzen 7 PRO 5850U with Radeon Graphics
 Cœurs physiques : 8  •  cœurs logiques : 16
 Mémoire vive : 31.3 Go
 Threads alloués à l'application : 15
-Mémoire allouée à l'application : 15360 Mo
+Mémoire allouée à l'application : 15008 Mo
 Budget historique (annuler) : 4096 Mo
 ```
 
@@ -71,21 +74,25 @@ python -m venv .venv
 | Ligne / Rectangle / Ellipse / Arrondi | `L` `R` `O` `U` |
 | Polygone / Dégradé / Texte / Sélection | `Y` `D` `T` `M` |
 | Taille du pinceau | `[` `]` |
+| Ligne droite au pinceau | `Maj+clic` |
 | Pipette temporaire | `Alt` |
+| Échanger avant-plan / arrière-plan | `X` |
 | Annuler / Rétablir | `Ctrl+Z` / `Ctrl+Y` |
 | Copier / Couper / Coller | `Ctrl+C` `Ctrl+X` `Ctrl+V` |
 | Tout sélectionner / Désélectionner | `Ctrl+A` / `Ctrl+D` |
+| Inverser la sélection | `Ctrl+Maj+I` |
 | Nouveau / Ouvrir / Enregistrer | `Ctrl+N` `Ctrl+O` `Ctrl+S` |
 | Zoom / ajuster / taille réelle | `Ctrl+molette` / `Ctrl+0` / `Ctrl+1` |
 | Déplacement du canevas | `Espace + glisser` ou bouton du milieu |
+| Ouvrir une image | glisser-déposer sur le canevas |
 
 ## Architecture
 
 ```
 paint/
-  app.py            fenêtre, menus, actions, E/S
-  canvas.py         rendu : zoom, pan, dirty-rect, fourmis
-  document.py       calques, composite mis en cache, sélection
+  app.py            fenêtre, menus, actions, E/S, session, fichiers récents
+  canvas.py         rendu : zoom, pan, dirty-rect, fourmis, ascenseurs
+  document.py       calques, composite mis en cache, sélection, transformations
   history.py        transactions et historique par tuiles 128×128
   brush.py          tampons, cache LRU, buffer de trait
   filters.py        flood fill numpy + filtres Pillow

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -42,9 +43,16 @@ class LayersDock(QDockWidget):
         layout.setSpacing(6)
         self.list = QListWidget()
         self.list.setMinimumHeight(150)
+        self.list.setIconSize(QSize(46, 34))
+        self.list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list.setDefaultDropAction(Qt.MoveAction)
+        self.list.setDragEnabled(True)
+        self.list.setAcceptDrops(True)
+        self.list.setDropIndicatorShown(True)
         self.list.itemChanged.connect(self._item_changed)
         self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemDoubleClicked.connect(self._rename)
+        self.list.model().rowsMoved.connect(self._rows_moved)
         layout.addWidget(self.list, 1)
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(QLabel("Opacité"))
@@ -91,9 +99,12 @@ class LayersDock(QDockWidget):
                 layer = doc.layers[index]
                 item = QListWidgetItem(layer.name)
                 item.setFlags(
-                    Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsEditable
+                    Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
+                    | Qt.ItemIsEditable | Qt.ItemIsDragEnabled
                 )
                 item.setCheckState(Qt.Checked if layer.visible else Qt.Unchecked)
+                item.setData(Qt.UserRole, layer.id)
+                item.setIcon(QIcon(self._thumbnail(layer)))
                 self.list.addItem(item)
             if 0 <= doc.active_index < len(doc.layers):
                 self.list.setCurrentRow(len(doc.layers) - 1 - doc.active_index)
@@ -103,6 +114,29 @@ class LayersDock(QDockWidget):
                 idx = self.blend.findData(layer.blend)
                 self.blend.setCurrentIndex(max(0, idx))
         self._guard = False
+
+    @staticmethod
+    def _thumbnail(layer) -> QPixmap:
+        thumb = QImage(46, 34, QImage.Format_ARGB32_Premultiplied)
+        thumb.fill(QColor("#34373c"))
+        painter = QPainter(thumb)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        scaled = layer.image.scaled(44, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        painter.drawImage((46 - scaled.width()) // 2, (34 - scaled.height()) // 2, scaled)
+        painter.end()
+        return QPixmap.fromImage(thumb)
+
+    def _rows_moved(self, parent, start, end, destination, row) -> None:
+        if self._guard:
+            return
+        ids = []
+        for index in range(self.list.count()):
+            value = self.list.item(index).data(Qt.UserRole)
+            if value is not None:
+                ids.append(int(value))
+        doc = self.app.doc
+        if doc is not None and ids:
+            QTimer.singleShot(0, lambda: doc.reorder_layers(ids))
 
     def _doc_index(self, row: int) -> int:
         doc = self.app.doc
