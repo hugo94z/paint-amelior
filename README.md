@@ -1,8 +1,11 @@
 # Paint Amélioré
 
 ![tests](https://github.com/hugo94z/paint-amelior/actions/workflows/tests.yml/badge.svg)
+![version](https://img.shields.io/badge/version-1.5.0-blue)
 
 Clone de Paint réécrit en Python, avec PySide6 et numpy. Pensé pour être **plus rapide** qu'un Paint classique et **plus agréable** au quotidien : onglets, calques, sélection avancée, filtres avec aperçu, animation et installateur Windows.
+
+Version actuelle : **1.5.0** (affichée dans la barre d'état et dans Aide → À propos).
 
 ## Fonctionnalités
 

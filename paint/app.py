@@ -607,6 +607,10 @@ class MainWindow(QMainWindow):
         hint = QLabel("Ctrl+molette = zoom   •   Espace+glisser = déplacer   •   glisser un fichier pour l'ouvrir")
         hint.setStyleSheet("color:#6f757f;")
         self.statusBar().addPermanentWidget(hint)
+        self.status_version = QLabel(f"v{APP_VERSION}")
+        self.status_version.setStyleSheet("color:#8a9099; padding-left:8px;")
+        self.status_version.setToolTip(f"{APP_NAME} {APP_VERSION}")
+        self.statusBar().addPermanentWidget(self.status_version)
 
     def _zoom_preset(self, index: int) -> None:
         self._apply_zoom_text(self.status_zoom.itemText(index))
