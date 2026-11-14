@@ -673,11 +673,11 @@ class MainWindow(QMainWindow):
 
     def _update_title(self, *args) -> None:
         if self.doc is None:
-            self.setWindowTitle(APP_NAME)
+            self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
             return
         name = self._document_label(self.doc)
         mark = " *" if self.doc.is_modified() else ""
-        self.setWindowTitle(f"{name}{mark} — {APP_NAME}")
+        self.setWindowTitle(f"{name}{mark} — {APP_NAME} {APP_VERSION}")
         self._update_active_tab()
 
     def _document_label(self, doc: Document) -> str:

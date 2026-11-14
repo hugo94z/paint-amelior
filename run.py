@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from paint.config import load_settings
+from paint.config import APP_NAME, APP_VERSION, load_settings
 
 _settings = load_settings()
 for _key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
@@ -16,6 +16,9 @@ for _key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUME
 
 
 def main() -> int:
+    if "--version" in sys.argv:
+        print(f"{APP_NAME} {APP_VERSION}")
+        return 0
     if "--hardware" in sys.argv:
         from paint.hardware import main as hardware_main
 

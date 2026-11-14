@@ -72,6 +72,8 @@ python -m venv .venv
 .\.venv\Scripts\python run.py
 ```
 
+Version installée : `python run.py --version` (affiche `Paint Amélioré 1.5.0`).
+
 ## Raccourcis
 
 | Action | Touche |
