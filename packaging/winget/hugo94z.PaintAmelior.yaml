@@ -1,0 +1,24 @@
+PackageIdentifier: hugo94z.PaintAmelior
+PackageVersion: 1.5.0
+PackageLocale: fr-FR
+Publisher: hugo94z
+PackageName: Paint Amélioré
+License: MIT
+ShortDescription: Éditeur d'images PySide6 avec calques, sélection et filtres
+Description: Clone modernisé de Paint : calques, masques, sélection avancée, filtres avec aperçu, animation et installateur Windows.
+Moniker: paint-amelior
+Tags:
+  - paint
+  - image
+  - editor
+  - pyside6
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: https://github.com/hugo94z/paint-amelior/releases/download/v1.5.0/Paint-Ameliore-win64.zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: Paint Ameliore.exe
+    InstallerSha256: A_REMPLACER_PAR_LE_SHA256_DU_ZIP
+ManifestType: singleton
+ManifestVersion: 1.6.0

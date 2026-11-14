@@ -22,7 +22,7 @@ class TextTool(BaseTool):
         self.opacity = 1.0
 
     def press(self, pos, event) -> None:
-        layer = self.doc.active_layer()
+        layer = self.paintable_layer()
         if layer is None:
             return
         dialog = TextDialog(self.app, self.family, self.pixel_size, self.bold, self.italic)

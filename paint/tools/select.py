@@ -15,6 +15,8 @@ class SelectionTool(BaseTool):
     def __init__(self, app):
         super().__init__(app)
         self.mode = "rect"
+        self.selection_mode = "replace"
+        self.feather = 0
         self._start: QPointF | None = None
         self._cur: QPointF | None = None
         self._points: list[QPointF] = []
@@ -98,7 +100,7 @@ class SelectionTool(BaseTool):
                 return
             path = QPainterPath()
             path.addRect(rect)
-            self.doc.set_selection(QRegion(rect), path)
+            self._apply_selection(QRegion(rect), path)
             self.notify(f"Sélection {rect.width()} × {rect.height()}")
         else:
             points = self._points[:]
@@ -110,10 +112,21 @@ class SelectionTool(BaseTool):
             path = QPainterPath()
             path.addPolygon(polygon)
             path.closeSubpath()
-            self.doc.set_selection(QRegion(polygon), path)
+            self._apply_selection(QRegion(polygon), path)
             self.notify("Sélection au lasso")
         self._points = []
         self.app.canvas.update()
+
+    def _apply_selection(self, region: QRegion, path: QPainterPath) -> None:
+        doc = self.doc
+        if self.selection_mode == "replace" or not doc.has_selection():
+            doc.set_selection(region, path, feather=self.feather)
+            return
+        from ..utils import region_mask
+
+        array = region_mask(region, doc.size.width(), doc.size.height())
+        if array is not None:
+            doc.combine_selection(array, self.selection_mode, self.feather)
 
     def _floating_rect(self) -> QRect:
         if self.doc.floating is None:
@@ -132,6 +145,9 @@ class SelectionTool(BaseTool):
         layer = doc.active_layer()
         if layer is None or not doc.has_selection():
             return
+        if layer.locked:
+            self.notify("Calque verrouillé")
+            return
         bounds = doc.selection.boundingRect().intersected(doc.rect())
         if bounds.isEmpty():
             return
@@ -140,11 +156,23 @@ class SelectionTool(BaseTool):
         self._tx = doc.history.begin("Déplacer la sélection")
         self._tx.touch(layer, bounds)
         image = layer.image.copy(bounds)
-        painter = QPainter(layer.image)
-        painter.setClipRegion(doc.selection)
-        painter.setCompositionMode(QPainter.CompositionMode_Source)
-        painter.fillRect(bounds, Qt.transparent)
-        painter.end()
+        mask = doc.mask_for_image()
+        if mask is not None:
+            local_mask = mask.copy(bounds)
+            painter = QPainter(image)
+            painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            painter.drawImage(0, 0, local_mask)
+            painter.end()
+            painter = QPainter(layer.image)
+            painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+            painter.drawImage(bounds.topLeft(), local_mask)
+            painter.end()
+        else:
+            painter = QPainter(layer.image)
+            painter.setClipRegion(doc.selection)
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.fillRect(bounds, Qt.transparent)
+            painter.end()
         doc.floating = image
         doc.floating_pos = bounds.topLeft()
         doc.invalidate(bounds)

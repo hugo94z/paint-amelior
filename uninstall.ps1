@@ -28,5 +28,15 @@ $programs = [Environment]::GetFolderPath("Programs")
 $menuDir = Join-Path $programs "Paint Ameliore"
 if (Test-Path $menuDir) { Remove-Item $menuDir -Recurse -Force }
 
+Remove-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PaintAmeliore" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path "HKCU:\Software\Classes\PaintAmeliore.paint" -Recurse -Force -ErrorAction SilentlyContinue
+$paintKey = "HKCU:\Software\Classes\.paint"
+if (Test-Path $paintKey) {
+    $value = (Get-ItemProperty -Path $paintKey -Name "(default)" -ErrorAction SilentlyContinue)."(default)"
+    if ($value -eq "PaintAmeliore.paint") {
+        Remove-Item -Path $paintKey -Force
+    }
+}
+
 Remove-Item -Path $InstallDir -Recurse -Force
 Write-Host "Paint Ameliore a ete desinstalle." -ForegroundColor Green

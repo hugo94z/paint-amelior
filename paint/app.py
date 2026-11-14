@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSize, QSettings, Qt, QThreadPool, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QSize, QSettings, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
+    QDesktopServices,
     QGuiApplication,
     QImage,
     QKeySequence,
@@ -29,27 +31,36 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QSpinBox,
+    QTabBar,
     QToolBar,
     QVBoxLayout,
+    QWidget,
 )
 
+from . import autosave
+from . import updater
+from .batch import convert as batch_convert
 from .brush import StampCache
 from .config import APP_NAME, APP_VERSION, Settings, load_settings
 from .document import Document
 from .filters import apply_to_document
 from .io.image_io import EXPORT_FILTER, export_image, load_image
+from .io.exporters import export_pdf, export_svg
 from .io.project_io import load_project, save_project
 from .layer import Layer
+from .plugins import load_plugins
 from .tools import build_tools
 from .tools.base import BaseTool
 from .ui.canvas import Canvas, CanvasHost
-from .ui.docks import ColorDock, HistoryDock, LayersDock
+from .ui.command_palette import CommandPalette
+from .ui.docks import AnimationDock, ColorDock, HistoryDock, LayersDock
+from .ui.filter_dialog import FilterDialog
 from .ui.icons import tool_icon
 from .ui.options_bar import OptionsBar
 from .ui.theme import apply_theme
 
 IMAGE_OPEN_FILTER = (
-    "Projet Paint (*.paint);;Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.gif)"
+    "Projet Paint (*.paint);;Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff *.gif *.psd)"
     ";;Tous les fichiers (*)"
 )
 SAVE_FILTER = (
@@ -178,16 +189,89 @@ class ResizeDialog(QDialog):
         return self.width_box.value(), self.height_box.value(), self.smooth.isChecked()
 
 
+class CanvasSizeDialog(QDialog):
+    def __init__(self, parent, width: int, height: int):
+        super().__init__(parent)
+        self.setWindowTitle("Taille du canevas")
+        self.setMinimumWidth(320)
+        self.width_box = QSpinBox()
+        self.width_box.setRange(1, 16384)
+        self.width_box.setValue(width)
+        self.width_box.setSuffix(" px")
+        self.height_box = QSpinBox()
+        self.height_box.setRange(1, 16384)
+        self.height_box.setValue(height)
+        self.height_box.setSuffix(" px")
+        self.anchor = QComboBox()
+        for key, label in (
+            ("top-left", "Haut gauche"), ("top", "Haut"), ("top-right", "Haut droite"),
+            ("left", "Gauche"), ("center", "Centre"), ("right", "Droite"),
+            ("bottom-left", "Bas gauche"), ("bottom", "Bas"), ("bottom-right", "Bas droite"),
+        ):
+            self.anchor.addItem(label, key)
+        self.anchor.setCurrentIndex(4)
+        form = QFormLayout()
+        form.addRow("Largeur", self.width_box)
+        form.addRow("Hauteur", self.height_box)
+        form.addRow("Ancrage", self.anchor)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[int, int, str]:
+        return self.width_box.value(), self.height_box.value(), self.anchor.currentData()
+
+
+class TransformSelectionDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Transformer la sélection")
+        self.setMinimumWidth(300)
+        self.angle = QSpinBox()
+        self.angle.setRange(-180, 180)
+        self.angle.setValue(0)
+        self.angle.setSuffix(" °")
+        self.scale_x = QSpinBox()
+        self.scale_x.setRange(10, 400)
+        self.scale_x.setValue(100)
+        self.scale_x.setSuffix(" %")
+        self.scale_y = QSpinBox()
+        self.scale_y.setRange(10, 400)
+        self.scale_y.setValue(100)
+        self.scale_y.setSuffix(" %")
+        form = QFormLayout()
+        form.addRow("Rotation", self.angle)
+        form.addRow("Échelle X", self.scale_x)
+        form.addRow("Échelle Y", self.scale_y)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[float, float, float]:
+        return (float(self.angle.value()), self.scale_x.value() / 100.0,
+                self.scale_y.value() / 100.0)
+
+
 class MainWindow(QMainWindow):
     colors_changed = Signal()
     doc_changed = Signal()
     DROP_SUFFIXES = {
-        ".paint", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif",
+        ".paint", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif", ".psd",
     }
 
     def __init__(self, settings: Settings):
         super().__init__()
         self.settings = settings
+        self.pressure = 1.0
+        self.show_grid = False
+        self.grid_size = 64
+        self.light_theme = False
         self.qsettings = QSettings("PaintAmeliore", "PaintAmeliore")
         self.recent_files = self._load_recent()
         self.stamp_cache = StampCache(settings.stamp_cache_bytes)
@@ -202,9 +286,25 @@ class MainWindow(QMainWindow):
         self.tool: BaseTool = self.tools["brush"]
         self.tool_actions: dict[str, QAction] = {}
         self._hooks = []
+        self.tabs: list[dict] = []
+        self._active_index = -1
+        self._tab_guard = False
         self.canvas = Canvas(self)
         self.canvas_host = CanvasHost(self.canvas)
-        self.setCentralWidget(self.canvas_host)
+        self.tab_bar = QTabBar()
+        self.tab_bar.setTabsClosable(True)
+        self.tab_bar.setMovable(True)
+        self.tab_bar.setExpanding(False)
+        self.tab_bar.setVisible(False)
+        self.tab_bar.currentChanged.connect(self._tab_changed)
+        self.tab_bar.tabCloseRequested.connect(self._close_tab)
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.tab_bar)
+        central_layout.addWidget(self.canvas_host, 1)
+        self.setCentralWidget(central)
         self.setAcceptDrops(True)
         self._build_actions()
         self._build_menus()
@@ -218,6 +318,13 @@ class MainWindow(QMainWindow):
         self._restore_session()
         tool_id = str(self.qsettings.value("tool/last", "brush"))
         self.set_tool(tool_id if tool_id in self.tools else "brush")
+        self.plugin_names = load_plugins(self)
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(90_000)
+        self.autosave_timer.timeout.connect(self._autosave_all)
+        self.autosave_timer.start()
+        QTimer.singleShot(600, self._check_recovery)
+        QTimer.singleShot(5000, self._auto_check_update)
 
     def _action(self, text, slot, shortcut=None, checkable=False, icon=None) -> QAction:
         action = QAction(text, self)
@@ -235,7 +342,13 @@ class MainWindow(QMainWindow):
         self.action_save = self._action("Enregistrer", self.save_document, "Ctrl+S")
         self.action_save_as = self._action("Enregistrer sous…", self.save_document_as, "Ctrl+Shift+S")
         self.action_export = self._action("Exporter une image…", self.export_document, "Ctrl+E")
+        self.action_export_pdf = self._action("Exporter en PDF…", self.export_pdf_dialog)
+        self.action_export_svg = self._action("Exporter en SVG…", self.export_svg_dialog)
+        self.action_batch = self._action("Traitement par lot…", self.batch_dialog)
+        self.action_palette = self._action("Palette de commandes", self.show_command_palette, "Ctrl+K")
+        self.action_update = self._action("Vérifier les mises à jour", self.check_updates)
         self.action_quit = self._action("Quitter", self.close, "Ctrl+Q")
+        self.action_close_tab = self._action("Fermer l'onglet", self.close_current_tab, "Ctrl+W")
 
         self.action_undo = self._action("Annuler", self.undo, "Ctrl+Z")
         self.action_redo = self._action("Rétablir", self.redo, "Ctrl+Y")
@@ -252,6 +365,26 @@ class MainWindow(QMainWindow):
         self.action_swap_colors = self._action("Échanger les couleurs", self.swap_colors, "X")
 
         self.action_resize = self._action("Redimensionner l'image…", self.resize_dialog)
+        self.action_crop = self._action("Recadrer", self.start_crop)
+        self.action_canvas_size = self._action("Taille du canevas…", self.canvas_size_dialog)
+        self.action_transform_selection = self._action(
+            "Transformer la sélection…", self.transform_selection_dialog, "Ctrl+T"
+        )
+        self.action_rotate_sel_left = self._action(
+            "Sélection : pivoter 90° à gauche", lambda: self.rotate_selection(-90)
+        )
+        self.action_rotate_sel_right = self._action(
+            "Sélection : pivoter 90° à droite", lambda: self.rotate_selection(90)
+        )
+        self.action_rotate_sel_180 = self._action(
+            "Sélection : pivoter 180°", lambda: self.rotate_selection(180)
+        )
+        self.action_flip_sel_h = self._action(
+            "Sélection : miroir horizontal", lambda: self.flip_selection(True, False)
+        )
+        self.action_flip_sel_v = self._action(
+            "Sélection : miroir vertical", lambda: self.flip_selection(False, True)
+        )
         self.action_rotate_left = self._action(
             "Pivoter 90° à gauche", lambda: self.transform_document(-90, label="Rotation à gauche")
         )
@@ -279,6 +412,11 @@ class MainWindow(QMainWindow):
         self.action_zoom_100 = self._action("Taille réelle", lambda: self.canvas.set_zoom(1.0), "Ctrl+1")
         self.action_zoom_fit = self._action("Ajuster à la fenêtre", self.canvas.fit, "Ctrl+0")
         self.action_fullscreen = self._action("Plein écran", self.toggle_fullscreen, "F11")
+        self.action_grid = self._action("Afficher la grille", self.toggle_grid, "Ctrl+G",
+                                        checkable=True)
+        self.action_grid_size = self._action("Taille de la grille…", self.grid_size_dialog)
+        self.action_light_theme = self._action("Thème clair", self.toggle_light_theme,
+                                                checkable=True)
 
         self.action_shortcuts = self._action("Raccourcis clavier", self.show_shortcuts)
         self.action_system = self._action("Configuration système", self.show_system_info)
@@ -307,6 +445,11 @@ class MainWindow(QMainWindow):
         for action in (self.action_save, self.action_save_as, self.action_export):
             file_menu.addAction(action)
         file_menu.addSeparator()
+        file_menu.addAction(self.action_export_pdf)
+        file_menu.addAction(self.action_export_svg)
+        file_menu.addAction(self.action_batch)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_close_tab)
         file_menu.addAction(self.action_quit)
 
         edit_menu = bar.addMenu("&Édition")
@@ -319,10 +462,20 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.action_select_all)
         edit_menu.addAction(self.action_deselect)
         edit_menu.addAction(self.action_invert_selection)
+        self.transform_menu = QMenu("Transformations de la sélection", self)
+        self.transform_menu.addAction(self.action_transform_selection)
+        self.transform_menu.addSeparator()
+        for action in (self.action_rotate_sel_left, self.action_rotate_sel_right,
+                       self.action_rotate_sel_180, self.action_flip_sel_h,
+                       self.action_flip_sel_v):
+            self.transform_menu.addAction(action)
+        edit_menu.addMenu(self.transform_menu)
         edit_menu.addSeparator()
         edit_menu.addAction(self.action_swap_colors)
 
         image_menu = bar.addMenu("&Image")
+        image_menu.addAction(self.action_crop)
+        image_menu.addAction(self.action_canvas_size)
         image_menu.addAction(self.action_resize)
         image_menu.addSeparator()
         for action in (self.action_rotate_left, self.action_rotate_right,
@@ -335,6 +488,10 @@ class MainWindow(QMainWindow):
             ("Luminosité…", self.filter_brightness),
             ("Contraste…", self.filter_contrast),
             ("Saturation…", self.filter_saturation),
+            ("Niveaux…", self.filter_levels),
+            ("Teinte…", self.filter_hue),
+            ("Vignettage…", self.filter_vignette),
+            ("Flou directionnel…", self.filter_motion),
             ("Niveaux de gris…", self.filter_grayscale),
             ("Pixeliser…", self.filter_pixelate),
             ("Inverser les couleurs", self.filter_invert),
@@ -349,17 +506,25 @@ class MainWindow(QMainWindow):
 
         tools_menu = bar.addMenu("&Outils")
         self.tools_menu = tools_menu
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.action_palette)
 
         view_menu = bar.addMenu("&Affichage")
+        self.view_menu = view_menu
         for action in (self.action_zoom_in, self.action_zoom_out, self.action_zoom_100,
                        self.action_zoom_fit):
             view_menu.addAction(action)
         view_menu.addSeparator()
+        view_menu.addAction(self.action_grid)
+        view_menu.addAction(self.action_grid_size)
+        view_menu.addSeparator()
+        view_menu.addAction(self.action_light_theme)
         view_menu.addAction(self.action_fullscreen)
 
         help_menu = bar.addMenu("Aid&e")
         help_menu.addAction(self.action_shortcuts)
         help_menu.addAction(self.action_system)
+        help_menu.addAction(self.action_update)
         help_menu.addAction(self.action_about)
 
     def _build_toolbars(self) -> None:
@@ -401,11 +566,21 @@ class MainWindow(QMainWindow):
         self.color_dock = ColorDock(self)
         self.layers_dock = LayersDock(self)
         self.history_dock = HistoryDock(self)
+        self.animation_dock = AnimationDock(self)
         self.addDockWidget(Qt.RightDockWidgetArea, self.color_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.layers_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.history_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.animation_dock)
+        self.tabifyDockWidget(self.history_dock, self.animation_dock)
+        self.animation_dock.hide()
+        self.animation_dock.visibilityChanged.connect(self._raise_animation)
+        self.view_menu.addAction(self.animation_dock.toggleViewAction())
         self.resizeDocks([self.color_dock, self.layers_dock, self.history_dock],
                          [220, 240, 220], Qt.Vertical)
+
+    def _raise_animation(self, visible: bool) -> None:
+        if visible:
+            self.animation_dock.raise_()
 
     def _build_status(self) -> None:
         self.status_coords = QLabel("—")
@@ -496,31 +671,137 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             self.setWindowTitle(APP_NAME)
             return
-        name = self.doc.path.name if self.doc.path else "Sans titre"
+        name = self._document_label(self.doc)
         mark = " *" if self.doc.is_modified() else ""
         self.setWindowTitle(f"{name}{mark} — {APP_NAME}")
+        self._update_active_tab()
+
+    def _document_label(self, doc: Document) -> str:
+        if doc.path is not None:
+            return doc.path.name
+        if 0 <= self._active_index < len(self.tabs):
+            state = self.tabs[self._active_index]
+            if state.get("doc") is doc and state.get("label"):
+                return state["label"]
+        return "Sans titre"
+
+    def _document_tab_text(self, doc: Document) -> str:
+        name = doc.path.name if doc.path else self._document_label_for_doc(doc)
+        return name + (" *" if doc.is_modified() else "")
+
+    def _document_label_for_doc(self, doc: Document) -> str:
+        for state in self.tabs:
+            if state.get("doc") is doc:
+                return state.get("label") or "Sans titre"
+        return "Sans titre"
+
+    def _update_active_tab(self) -> None:
+        if not 0 <= self._active_index < self.tab_bar.count() or self.doc is None:
+            return
+        self.tab_bar.setTabText(self._active_index, self._document_tab_text(self.doc))
+        self.tab_bar.setTabToolTip(
+            self._active_index, str(self.doc.path) if self.doc.path else "Document non enregistré"
+        )
+
+    def _tabs_visibility(self) -> None:
+        self.tab_bar.setVisible(len(self.tabs) > 1)
+
+    def _add_tab(self, doc: Document, label: str | None = None, fit: bool = True) -> None:
+        if label is None and doc.path is None:
+            untitled = 1 + sum(
+                1 for state in self.tabs if state.get("doc") is not None and state["doc"].path is None
+            )
+            label = f"Sans titre {untitled}"
+        state = {"doc": doc, "zoom": None, "pan": None, "label": label,
+                 "autosave": autosave.new_slot()}
+        self.tabs.append(state)
+        self._tab_guard = True
+        index = self.tab_bar.addTab(self._document_tab_text(doc))
+        self.tab_bar.setTabToolTip(
+            index, str(doc.path) if doc.path else "Document non enregistré"
+        )
+        self._tab_guard = False
+        self._activate_tab(len(self.tabs) - 1, fit=fit)
+        self._tabs_visibility()
+
+    def _tab_changed(self, index: int) -> None:
+        if self._tab_guard:
+            return
+        self._activate_tab(index)
+
+    def _activate_tab(self, index: int, fit: bool = False) -> None:
+        if not 0 <= index < len(self.tabs):
+            return
+        if hasattr(self, "animation_dock"):
+            self.animation_dock.stop()
+        if self._active_index >= 0 and self.doc is not None and self._active_index < len(self.tabs):
+            current = self.tabs[self._active_index]
+            current["zoom"] = self.canvas.zoom
+            current["pan"] = QPointF(self.canvas.pan)
+        self.commit_floating()
+        state = self.tabs[index]
+        self._active_index = index
+        self._tab_guard = True
+        self.tab_bar.setCurrentIndex(index)
+        self._tab_guard = False
+        self.set_document(state["doc"])
+        if fit or state["zoom"] is None:
+            self.canvas.fit()
+        else:
+            self.canvas.restore_view(state["zoom"], state["pan"])
+        self._update_title()
+        self._tabs_visibility()
+
+    def _activate_doc(self, doc: Document) -> None:
+        for index, state in enumerate(self.tabs):
+            if state["doc"] is doc:
+                self._activate_tab(index)
+                return
+
+    def _close_tab(self, index: int) -> None:
+        if not 0 <= index < len(self.tabs):
+            return
+        self._activate_tab(index)
+        if not self.maybe_save():
+            return
+        state = self.tabs[index]
+        self._tab_guard = True
+        self.tab_bar.removeTab(index)
+        self._tab_guard = False
+        del self.tabs[index]
+        autosave.clear(state.get("autosave", ""))
+        for signal, slot in self._hooks:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        self._hooks = []
+        self._active_index = -1
+        self.doc = None
+        if not self.tabs:
+            self._create_document(1600, 1000, QColor("#ffffff"))
+            return
+        self._activate_tab(min(index, len(self.tabs) - 1))
+        self._tabs_visibility()
 
     def _create_document(self, width: int, height: int, background: QColor | None) -> None:
         doc = Document.new(width, height, background,
                            undo_budget=self.settings.undo_budget_bytes)
         doc.invalidate_all()
-        self.set_document(doc)
-        self.canvas.fit()
+        self._add_tab(doc, fit=True)
         self.notify(f"Document {width} × {height} créé")
 
+    def close_current_tab(self) -> None:
+        if self.tabs:
+            self._close_tab(self._active_index)
+
     def new_document_dialog(self) -> None:
-        self.commit_floating()
-        if not self.maybe_save():
-            return
         dialog = NewDocumentDialog(self)
         if dialog.exec() == QDialog.Accepted:
             width, height = dialog.document_size()
             self._create_document(width, height, dialog.background_color())
 
     def open_document(self) -> None:
-        self.commit_floating()
-        if not self.maybe_save():
-            return
         start = str(self.doc.path.parent) if self.doc and self.doc.path else ""
         path, _ = QFileDialog.getOpenFileName(self, "Ouvrir", start, IMAGE_OPEN_FILTER)
         if not path:
@@ -534,8 +815,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, APP_NAME, "Impossible d'ouvrir ce projet.")
                 return
             doc.invalidate_all()
-            self.set_document(doc)
-            self.canvas.fit()
+            self._add_tab(doc, fit=True)
             self._add_recent(path)
             self.notify(f"Projet ouvert : {path.name}")
             return
@@ -553,8 +833,7 @@ class MainWindow(QMainWindow):
         doc.history.clear()
         doc.path = None
         doc.mark_modified(False)
-        self.set_document(doc)
-        self.canvas.fit()
+        self._add_tab(doc, label=path.stem or "Image", fit=True)
         self._add_recent(path)
         self.notify(f"Image ouverte : {path.name}")
 
@@ -590,6 +869,9 @@ class MainWindow(QMainWindow):
         if ok:
             doc.path = path
             doc.mark_modified(False)
+            state = self.tabs[self._active_index] if 0 <= self._active_index < len(self.tabs) else None
+            if state is not None:
+                autosave.clear(state.get("autosave", ""))
             self._update_title()
             self._add_recent(path)
             self.notify(f"Enregistré : {path.name}")
@@ -622,6 +904,93 @@ class MainWindow(QMainWindow):
             if export_image(self.doc, target):
                 self.notify(f"Image exportée : {target.name}")
 
+    def export_pdf_dialog(self) -> None:
+        if self.doc is None:
+            return
+        self.commit_floating()
+        path, _ = QFileDialog.getSaveFileName(self, "Exporter en PDF",
+                                             self._default_name(".pdf"), "PDF (*.pdf)")
+        if path:
+            target = Path(path)
+            if not target.suffix:
+                target = target.with_suffix(".pdf")
+            if export_pdf(self.doc, target):
+                self.notify(f"PDF exporté : {target.name}")
+            else:
+                self.notify("Échec de l'export PDF")
+
+    def export_svg_dialog(self) -> None:
+        if self.doc is None:
+            return
+        self.commit_floating()
+        path, _ = QFileDialog.getSaveFileName(self, "Exporter en SVG",
+                                             self._default_name(".svg"), "SVG (*.svg)")
+        if path:
+            target = Path(path)
+            if not target.suffix:
+                target = target.with_suffix(".svg")
+            if export_svg(self.doc, target):
+                self.notify(f"SVG exporté : {target.name}")
+            else:
+                self.notify("Échec de l'export SVG")
+
+    def batch_dialog(self) -> None:
+        source = QFileDialog.getExistingDirectory(self, "Dossier source")
+        if not source:
+            return
+        output = QFileDialog.getExistingDirectory(self, "Dossier de sortie")
+        if not output:
+            return
+        width, ok = QInputDialog.getInt(self, "Traitement par lot",
+                                        "Largeur maximale (0 = originale) :", 0, 0, 16384, 64)
+        if not ok:
+            return
+        fmt, ok = QInputDialog.getItem(self, "Traitement par lot", "Format :",
+                                       ["png", "jpg", "webp", "tiff"], 0, False)
+        if not ok:
+            return
+        files = [p for p in Path(source).iterdir()
+                 if p.suffix.lower() in self.DROP_SUFFIXES]
+        written = batch_convert(files, output, width, fmt)
+        self.notify(f"{len(written)} fichier(s) converti(s)")
+
+    def show_command_palette(self) -> None:
+        CommandPalette(self).exec()
+
+    def check_updates(self) -> None:
+        self.notify("Vérification des mises à jour…")
+        QApplication.processEvents()
+        result = updater.latest()
+        if result is None:
+            QMessageBox.information(self, "Mises à jour",
+                                    "Impossible de contacter GitHub pour le moment.")
+            return
+        version, url = result
+        if version == APP_VERSION:
+            QMessageBox.information(self, "Mises à jour",
+                                    f"Vous utilisez la dernière version ({APP_VERSION}).")
+            return
+        answer = QMessageBox.question(
+            self, "Mise à jour disponible",
+            f"La version {version} est disponible (installée : {APP_VERSION}).\n"
+            "Ouvrir la page de téléchargement ?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _auto_check_update(self) -> None:
+        try:
+            last = float(self.qsettings.value("update/last", 0) or 0)
+        except (TypeError, ValueError):
+            last = 0
+        if time.time() - last < 86400:
+            return
+        self.qsettings.setValue("update/last", time.time())
+        result = updater.latest(timeout=4.0)
+        if result is not None and result[0] != APP_VERSION:
+            self.notify(f"Mise à jour {result[0]} disponible (Aide → Vérifier les mises à jour)")
+
     def maybe_save(self) -> bool:
         doc = self.doc
         self.commit_floating()
@@ -640,11 +1009,47 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event) -> None:
-        if self.maybe_save():
-            self._save_session()
-            event.accept()
-        else:
-            event.ignore()
+        for state in list(self.tabs):
+            doc = state["doc"]
+            if not doc.is_modified():
+                continue
+            self._activate_doc(doc)
+            if not self.maybe_save():
+                event.ignore()
+                return
+        for state in self.tabs:
+            autosave.clear(state.get("autosave", ""))
+        self._save_session()
+        event.accept()
+
+    def _autosave_all(self) -> None:
+        for state in self.tabs:
+            doc = state["doc"]
+            if doc.is_modified():
+                autosave.write(doc, state["autosave"], state["label"])
+
+    def _check_recovery(self) -> None:
+        pending = autosave.entries()
+        if not pending:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Récupération de documents",
+            f"{len(pending)} document(s) non enregistré(s) ont été retrouvés après un arrêt brutal.\n"
+            "Voulez-vous les restaurer ?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            autosave.clear_all()
+            return
+        for entry in pending:
+            doc = autosave.load(entry, self.settings.undo_budget_bytes)
+            autosave.clear(entry.get("slot", ""))
+            if doc is None:
+                continue
+            label = entry.get("label") or "Document récupéré"
+            self._add_tab(doc, label=label, fit=True)
+        self.notify("Documents récupérés")
 
     def _load_recent(self) -> list[str]:
         value = self.qsettings.value("files/recent", [])
@@ -667,6 +1072,9 @@ class MainWindow(QMainWindow):
         self.qsettings.setValue("colors/fg", self.fg.name(QColor.HexArgb))
         self.qsettings.setValue("colors/bg", self.bg.name(QColor.HexArgb))
         self.qsettings.setValue("files/recent", self.recent_files)
+        self.qsettings.setValue("ui/light", self.light_theme)
+        self.qsettings.setValue("ui/grid", self.show_grid)
+        self.qsettings.setValue("ui/grid_size", self.grid_size)
 
     def _restore_session(self) -> None:
         geometry = self.qsettings.value("window/geometry")
@@ -681,6 +1089,16 @@ class MainWindow(QMainWindow):
                 color = QColor(str(stored))
                 if color.isValid():
                     setattr(self, attr, color)
+        try:
+            self.grid_size = max(4, int(self.qsettings.value("ui/grid_size", 64)))
+        except (TypeError, ValueError):
+            self.grid_size = 64
+        if str(self.qsettings.value("ui/grid", "false")).lower() in ("1", "true", "yes"):
+            self.show_grid = True
+            self.action_grid.setChecked(True)
+        if str(self.qsettings.value("ui/light", "false")).lower() in ("1", "true", "yes"):
+            self.action_light_theme.setChecked(True)
+            self.toggle_light_theme(True)
         self._update_recent_menu()
         self.colors_changed.emit()
 
@@ -726,8 +1144,6 @@ class MainWindow(QMainWindow):
             self._remove_recent(path)
             self.notify("Fichier introuvable, entrée retirée")
             return
-        if not self.maybe_save():
-            return
         self.load_path(target)
 
     def can_drop(self, mime) -> bool:
@@ -742,8 +1158,6 @@ class MainWindow(QMainWindow):
                 continue
             path = Path(url.toLocalFile())
             if path.suffix.lower() in self.DROP_SUFFIXES:
-                if not self.maybe_save():
-                    return
                 self.load_path(path)
                 return
 
@@ -755,6 +1169,52 @@ class MainWindow(QMainWindow):
         self.doc.transform_image(angle, flip_h, flip_v, label)
         self._on_size_changed()
         self.notify("Transformation appliquée")
+
+    def start_crop(self) -> None:
+        self.set_tool("crop")
+        self.notify("Glissez le cadre de recadrage puis appuyez sur Entrée")
+
+    def canvas_size_dialog(self) -> None:
+        if self.doc is None:
+            return
+        self.commit_floating()
+        dialog = CanvasSizeDialog(self, self.doc.size.width(), self.doc.size.height())
+        if dialog.exec() == QDialog.Accepted:
+            width, height, anchor = dialog.values()
+            self.doc.resize_canvas(width, height, anchor)
+            self.canvas.fit()
+            self.notify("Taille du canevas modifiée")
+
+    def transform_selection_dialog(self) -> None:
+        if self.doc is None or not self.doc.has_selection():
+            self.notify("Aucune sélection active")
+            return
+        self.commit_floating()
+        dialog = TransformSelectionDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            angle, scale_x, scale_y = dialog.values()
+            if self.doc.transform_selection(angle, scale_x, scale_y):
+                self.canvas.update()
+                self.notify("Sélection transformée")
+
+    def rotate_selection(self, angle: int) -> None:
+        if self.doc is None or not self.doc.has_selection():
+            self.notify("Aucune sélection active")
+            return
+        self.commit_floating()
+        if self.doc.transform_selection(angle, 1.0, 1.0):
+            self.canvas.update()
+            self.notify("Sélection pivotée")
+
+    def flip_selection(self, horizontal: bool = False, vertical: bool = False) -> None:
+        if self.doc is None or not self.doc.has_selection():
+            self.notify("Aucune sélection active")
+            return
+        self.commit_floating()
+        if self.doc.transform_selection(0.0, -1.0 if horizontal else 1.0,
+                                        -1.0 if vertical else 1.0):
+            self.canvas.update()
+            self.notify("Sélection retournée")
 
     def invert_selection(self) -> None:
         if self.doc is None:
@@ -800,16 +1260,23 @@ class MainWindow(QMainWindow):
         if bounds.isEmpty():
             return None
         image = layer.image.copy(bounds)
-        if doc.has_selection():
-            mask = QImage(bounds.size(), QImage.Format_ARGB32_Premultiplied)
-            mask.fill(Qt.transparent)
-            painter = QPainter(mask)
+        mask = doc.mask_for_image()
+        if mask is not None:
+            local_mask = mask.copy(bounds)
+            painter = QPainter(image)
+            painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            painter.drawImage(0, 0, local_mask)
+            painter.end()
+        elif doc.has_selection():
+            region_mask_image = QImage(bounds.size(), QImage.Format_ARGB32_Premultiplied)
+            region_mask_image.fill(Qt.transparent)
+            painter = QPainter(region_mask_image)
             painter.setClipRegion(doc.selection.translated(-bounds.left(), -bounds.top()))
-            painter.fillRect(mask.rect(), Qt.white)
+            painter.fillRect(region_mask_image.rect(), Qt.white)
             painter.end()
             painter = QPainter(image)
             painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-            painter.drawImage(0, 0, mask)
+            painter.drawImage(0, 0, region_mask_image)
             painter.end()
         return image
 
@@ -929,42 +1396,94 @@ class MainWindow(QMainWindow):
             self.canvas.update()
             self.notify(f"{label} appliqué")
 
+    def _open_filter(self, filter_id: str, title: str, params: list[dict]) -> None:
+        if self.doc is None:
+            return
+        self.commit_floating()
+        if self.doc.is_active_locked():
+            self.notify("Calque verrouillé")
+            return
+        dialog = FilterDialog(self, filter_id, title, params)
+        if dialog.exec() == QDialog.Accepted:
+            values = dialog.values()
+            if apply_to_document(self.doc, filter_id, values.get("value", 0.0), title, values):
+                self.canvas.update()
+                self.notify(f"{title} appliqué")
+
     def filter_blur(self) -> None:
-        value, ok = QInputDialog.getDouble(self, "Flou gaussien", "Rayon (px) :", 4.0, 0.1, 100.0, 1)
-        if ok:
-            self._apply_filter("blur", "Flou gaussien", value)
+        self._open_filter("blur", "Flou gaussien", [
+            {"key": "value", "label": "Rayon", "min": 0.1, "max": 100.0,
+             "value": 4.0, "decimals": 1, "suffix": " px"},
+        ])
 
     def filter_sharpen(self) -> None:
-        value, ok = QInputDialog.getDouble(self, "Netteté", "Intensité (%) :", 120.0, 1.0, 500.0, 1)
-        if ok:
-            self._apply_filter("sharpen", "Netteté", value)
+        self._open_filter("sharpen", "Netteté", [
+            {"key": "value", "label": "Intensité", "min": 1.0, "max": 500.0,
+             "value": 120.0, "decimals": 0, "suffix": " %"},
+        ])
 
     def filter_brightness(self) -> None:
-        value, ok = QInputDialog.getDouble(self, "Luminosité", "Facteur :", 1.15, 0.1, 3.0, 2)
-        if ok:
-            self._apply_filter("brightness", "Luminosité", value)
+        self._open_filter("brightness", "Luminosité", [
+            {"key": "value", "label": "Facteur", "min": 0.1, "max": 3.0,
+             "value": 1.15, "decimals": 2, "step": 0.05},
+        ])
 
     def filter_contrast(self) -> None:
-        value, ok = QInputDialog.getDouble(self, "Contraste", "Facteur :", 1.2, 0.1, 3.0, 2)
-        if ok:
-            self._apply_filter("contrast", "Contraste", value)
+        self._open_filter("contrast", "Contraste", [
+            {"key": "value", "label": "Facteur", "min": 0.1, "max": 3.0,
+             "value": 1.2, "decimals": 2, "step": 0.05},
+        ])
 
     def filter_saturation(self) -> None:
-        value, ok = QInputDialog.getDouble(self, "Saturation", "Facteur :", 1.2, 0.0, 3.0, 2)
-        if ok:
-            self._apply_filter("saturation", "Saturation", value)
+        self._open_filter("saturation", "Saturation", [
+            {"key": "value", "label": "Facteur", "min": 0.0, "max": 3.0,
+             "value": 1.2, "decimals": 2, "step": 0.05},
+        ])
+
+    def filter_levels(self) -> None:
+        self._open_filter("levels", "Niveaux", [
+            {"key": "black", "label": "Point noir", "min": 0, "max": 254,
+             "value": 0, "decimals": 0},
+            {"key": "white", "label": "Point blanc", "min": 1, "max": 255,
+             "value": 255, "decimals": 0},
+            {"key": "gamma", "label": "Gamma", "min": 0.1, "max": 3.0,
+             "value": 1.0, "decimals": 2, "step": 0.05},
+        ])
+
+    def filter_hue(self) -> None:
+        self._open_filter("hue", "Teinte", [
+            {"key": "shift", "label": "Décalage", "min": 0, "max": 255,
+             "value": 32, "decimals": 0, "suffix": " °"},
+        ])
+
+    def filter_vignette(self) -> None:
+        self._open_filter("vignette", "Vignettage", [
+            {"key": "strength", "label": "Intensité", "min": 0.0, "max": 1.0,
+             "value": 0.6, "decimals": 2, "step": 0.05},
+        ])
+
+    def filter_motion(self) -> None:
+        self._open_filter("motionblur", "Flou directionnel", [
+            {"key": "distance", "label": "Distance", "min": 2, "max": 80,
+             "value": 12, "decimals": 0, "suffix": " px"},
+            {"key": "angle", "label": "Angle", "min": 0, "max": 180,
+             "value": 0, "decimals": 0, "suffix": " °"},
+        ])
 
     def filter_grayscale(self) -> None:
-        value, ok = QInputDialog.getDouble(self, "Niveaux de gris", "Intensité (0 à 1) :", 1.0, 0.0, 1.0, 2)
-        if ok:
-            self._apply_filter("grayscale", "Niveaux de gris", value)
+        self._open_filter("grayscale", "Niveaux de gris", [
+            {"key": "value", "label": "Intensité", "min": 0.0, "max": 1.0,
+             "value": 1.0, "decimals": 2, "step": 0.05},
+        ])
 
     def filter_pixelate(self) -> None:
-        value, ok = QInputDialog.getInt(self, "Pixeliser", "Taille des blocs (px) :", 8, 2, 200, 1)
-        if ok:
-            self._apply_filter("pixelate", "Pixelisation", value)
+        self._open_filter("pixelate", "Pixeliser", [
+            {"key": "value", "label": "Taille des blocs", "min": 2, "max": 200,
+             "value": 8, "decimals": 0, "suffix": " px"},
+        ])
 
     def filter_invert(self) -> None:
+        self.commit_floating()
         self._apply_filter("invert", "Inversion")
 
     def toggle_fullscreen(self) -> None:
@@ -973,14 +1492,56 @@ class MainWindow(QMainWindow):
         else:
             self.showFullScreen()
 
-    def pick_color(self, pos) -> None:
+    def toggle_grid(self, checked: bool) -> None:
+        self.show_grid = bool(checked)
+        self.canvas.update()
+        self.notify("Grille affichée" if self.show_grid else "Grille masquée")
+
+    def grid_size_dialog(self) -> None:
+        value, ok = QInputDialog.getInt(self, "Taille de la grille", "Espacement (px) :",
+                                        self.grid_size, 4, 400, 4)
+        if ok:
+            self.grid_size = value
+            self.action_grid.setChecked(True)
+            self.show_grid = True
+            self.canvas.update()
+            self.notify(f"Grille : {self.grid_size} px")
+
+    def toggle_light_theme(self, checked: bool) -> None:
+        self.light_theme = bool(checked)
+        from PySide6.QtWidgets import QApplication
+
+        from .ui.theme import apply_theme
+
+        apply_theme(QApplication.instance(), light=self.light_theme)
+        self.canvas.refresh_theme()
+        self._refresh_icons()
+        self.notify("Thème clair" if self.light_theme else "Thème sombre")
+
+    def _refresh_icons(self) -> None:
+        color = "#1f2937" if self.light_theme else "#e8eaed"
+        for tool in self.tools.values():
+            action = self.tool_actions.get(tool.id)
+            if action is not None:
+                action.setIcon(tool_icon(tool.icon, color=color))
+        self.setWindowIcon(tool_icon("brush", color=color, size=64))
+
+    def pick_color(self, pos, sample_size: int = 1) -> None:
         doc = self.doc
         if doc is None:
             return
         x, y = int(pos.x()), int(pos.y())
         if not doc.rect().contains(QPoint(x, y)):
             return
-        color = doc.composite().pixelColor(x, y)
+        sample = max(1, int(sample_size))
+        if sample > 1:
+            half = sample // 2
+            rect = QRect(x - half, y - half, sample, sample).intersected(doc.rect())
+            color = doc.composite().copy(rect).scaled(
+                1, 1, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+            ).pixelColor(0, 0)
+        else:
+            color = doc.composite().pixelColor(x, y)
         if color.alpha() == 0:
             color.setAlpha(255)
         self.set_fg_color(color)
@@ -1077,6 +1638,17 @@ def main() -> int:
     apply_theme(app)
     window = MainWindow(settings)
     window.show()
+    opened = 0
+    for raw in sys.argv[1:]:
+        path = Path(raw)
+        if path.is_file() and path.suffix.lower() in window.DROP_SUFFIXES:
+            window.load_path(path)
+            opened += 1
+    if opened and len(window.tabs) > 1:
+        first = window.tabs[0]
+        if first["doc"].path is None and not first["doc"].is_modified():
+            window._activate_tab(0)
+            window._close_tab(0)
     return app.exec()
 
 

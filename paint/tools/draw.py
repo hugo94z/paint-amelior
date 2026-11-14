@@ -19,6 +19,7 @@ class BrushTool(BaseTool):
         self.size = 24
         self.opacity = 1.0
         self.hardness = 0.85
+        self.pressure_size = True
         self._layer = None
         self._tx = None
         self._buffer: StrokeBuffer | None = None
@@ -32,7 +33,7 @@ class BrushTool(BaseTool):
         return QColor(Qt.black) if self.erase else self.app.fg
 
     def press(self, pos, event) -> None:
-        layer = self.doc.active_layer()
+        layer = self.paintable_layer()
         if layer is None:
             return
         self._layer = layer
@@ -54,8 +55,12 @@ class BrushTool(BaseTool):
     def _paint_to(self, pos: QPointF) -> None:
         if self._buffer is None or self._tx is None:
             return
-        stamp = self.app.stamp_cache.get(self.size, self.hardness, self._color())
-        spacing = max(0.75, self.size * 0.12)
+        pressure = 1.0
+        if self.pressure_size:
+            pressure = max(0.05, min(1.0, getattr(self.app, "pressure", 1.0)))
+        effective = max(1, int(round(self.size * (0.3 + 0.7 * pressure))))
+        stamp = self.app.stamp_cache.get(effective, self.hardness, self._color())
+        spacing = max(0.75, effective * 0.12)
         points = [pos] if self._last is None else list(stamps_along(self._last, pos, spacing))
         rect = QRect()
         for point in points:
@@ -71,13 +76,23 @@ class BrushTool(BaseTool):
         if self._buffer is None or self._tx is None:
             return
         layer = self._layer
+        image = self._buffer.image
+        mask = self.doc.mask_for_image()
+        if mask is not None:
+            image = image.copy()
+            mask_painter = QPainter(image)
+            mask_painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            mask_painter.drawImage(0, 0, mask)
+            mask_painter.end()
         painter = QPainter(layer.image)
-        if self.doc.has_selection():
+        if mask is None and self.doc.has_selection():
             painter.setClipRegion(self.doc.selection)
         painter.setOpacity(self.opacity)
         if self.erase:
             painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
-        painter.drawImage(0, 0, self._buffer.image)
+        elif layer.lock_alpha:
+            painter.setCompositionMode(QPainter.CompositionMode_SourceAtop)
+        painter.drawImage(0, 0, image)
         painter.end()
         self.doc.invalidate(self._buffer.dirty)
         self._tx.commit()

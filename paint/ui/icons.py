@@ -90,6 +90,18 @@ def tool_icon(kind: str, color: str = "#e8eaed", size: int = 24) -> QIcon:
         pen.setDashPattern([2.2, 2.2])
         painter.setPen(pen)
         painter.drawRect(QRectF(4, 5, 16, 14))
+    elif kind == "wand":
+        painter.drawLine(QPointF(5, 19), QPointF(15, 9))
+        painter.drawLine(QPointF(15, 9), QPointF(17, 7))
+        painter.setPen(QPen(QColor(color), 1.4))
+        for cx, cy, r in ((18.5, 4.5, 1.6), (21, 8, 1.1), (15, 3.5, 1.0)):
+            painter.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
+            painter.drawLine(QPointF(cx, cy - r), QPointF(cx, cy + r))
+    elif kind == "crop":
+        painter.drawLine(QPointF(6, 3), QPointF(6, 18))
+        painter.drawLine(QPointF(3, 6), QPointF(18, 6))
+        painter.drawLine(QPointF(18, 6), QPointF(18, 21))
+        painter.drawLine(QPointF(6, 18), QPointF(21, 18))
     elif kind == "zoom":
         painter.drawEllipse(QPointF(10.5, 10.5), 5.5, 5.5)
         painter.drawLine(QPointF(15, 15), QPointF(20, 20))

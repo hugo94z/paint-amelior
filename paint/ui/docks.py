@@ -8,17 +8,22 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QDockWidget,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QSlider,
+    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+from ..io.exporters import export_animation
 
 from ..layer import BLEND_MODES
 
@@ -87,6 +92,52 @@ class LayersDock(QDockWidget):
             button.clicked.connect(slot)
             buttons.addWidget(button)
         layout.addLayout(buttons)
+        extras = QHBoxLayout()
+        extras.setSpacing(3)
+        self.mask_button = QToolButton()
+        self.mask_button.setText("Masque")
+        self.mask_button.setToolTip("Masque de fusion")
+        self.mask_button.setPopupMode(QToolButton.MenuButtonPopup)
+        mask_menu = QMenu(self.mask_button)
+        mask_menu.addAction("Ajouter depuis la sélection",
+                            lambda: self.app.doc and self.app.doc.add_layer_mask())
+        mask_menu.addAction("Ajouter un masque complet",
+                            lambda: self.app.doc and self.app.doc.add_layer_mask(from_selection=False))
+        mask_menu.addAction("Activer / désactiver", self._toggle_mask)
+        mask_menu.addAction("Appliquer le masque",
+                            lambda: self.app.doc and self.app.doc.apply_layer_mask())
+        mask_menu.addAction("Supprimer le masque",
+                            lambda: self.app.doc and self.app.doc.remove_layer_mask())
+        self.mask_button.setMenu(mask_menu)
+        self.mask_button.clicked.connect(lambda: self.app.doc and self.app.doc.add_layer_mask())
+        extras.addWidget(self.mask_button)
+        self.adjust_button = QToolButton()
+        self.adjust_button.setText("Réglage")
+        self.adjust_button.setToolTip("Calque de réglage non destructif")
+        self.adjust_button.setPopupMode(QToolButton.MenuButtonPopup)
+        adjust_menu = QMenu(self.adjust_button)
+        adjust_menu.addAction("Luminosité", lambda: self._add_adjustment("brightness", 1.15))
+        adjust_menu.addAction("Contraste", lambda: self._add_adjustment("contrast", 1.2))
+        adjust_menu.addAction("Saturation", lambda: self._add_adjustment("saturation", 1.2))
+        adjust_menu.addAction("Niveaux de gris", lambda: self._add_adjustment("grayscale", 1.0))
+        adjust_menu.addSeparator()
+        adjust_menu.addAction("Modifier le réglage…", self._edit_adjustment)
+        self.adjust_button.setMenu(adjust_menu)
+        self.adjust_button.clicked.connect(lambda: self._add_adjustment("brightness", 1.15))
+        extras.addWidget(self.adjust_button)
+        self.lock_button = QToolButton()
+        self.lock_button.setText("Verrou")
+        self.lock_button.setCheckable(True)
+        self.lock_button.setToolTip("Verrouiller le calque")
+        self.lock_button.toggled.connect(self._lock_changed)
+        extras.addWidget(self.lock_button)
+        self.alpha_button = QToolButton()
+        self.alpha_button.setText("Alpha")
+        self.alpha_button.setCheckable(True)
+        self.alpha_button.setToolTip("Verrouiller la transparence")
+        self.alpha_button.toggled.connect(self._alpha_changed)
+        extras.addWidget(self.alpha_button)
+        layout.addLayout(extras)
         self.setWidget(container)
         app.doc_changed.connect(self.refresh)
 
@@ -113,6 +164,9 @@ class LayersDock(QDockWidget):
                 self.opacity_label.setText(f"{int(round(layer.opacity * 100))} %")
                 idx = self.blend.findData(layer.blend)
                 self.blend.setCurrentIndex(max(0, idx))
+                self.lock_button.setChecked(layer.locked)
+                self.alpha_button.setChecked(layer.lock_alpha)
+                self.mask_button.setEnabled(True)
         self._guard = False
 
     @staticmethod
@@ -141,6 +195,58 @@ class LayersDock(QDockWidget):
     def _doc_index(self, row: int) -> int:
         doc = self.app.doc
         return len(doc.layers) - 1 - row if doc else -1
+
+    def _toggle_mask(self) -> None:
+        doc = self.app.doc
+        if doc is None:
+            return
+        layer = doc.active_layer()
+        if layer is not None and layer.mask is not None:
+            doc.set_layer_props(doc.active_index, mask_enabled=not layer.mask_enabled)
+
+    def _add_adjustment(self, kind: str, value: float) -> None:
+        doc = self.app.doc
+        if doc is not None:
+            doc.add_adjustment_layer(kind, value)
+
+    def _edit_adjustment(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        doc = self.app.doc
+        if doc is None:
+            return
+        layer = doc.active_layer()
+        if layer is None or layer.adjustment is None:
+            return
+        labels = {
+            "brightness": "Luminosité (facteur)",
+            "contrast": "Contraste (facteur)",
+            "saturation": "Saturation (facteur)",
+            "grayscale": "Niveaux de gris (0 à 1)",
+        }
+        maximum = 1.0 if layer.adjustment.get("type") == "grayscale" else 3.0
+        value, ok = QInputDialog.getDouble(
+            self, "Modifier le réglage",
+            labels.get(layer.adjustment.get("type"), "Valeur"),
+            float(layer.adjustment.get("value", 1.0)), 0.0, maximum, 2,
+        )
+        if ok:
+            doc.set_layer_adjustment(doc.active_index,
+                                     {"type": layer.adjustment.get("type"), "value": value})
+
+    def _lock_changed(self, value: bool) -> None:
+        if self._guard:
+            return
+        doc = self.app.doc
+        if doc is not None:
+            doc.set_layer_props(doc.active_index, locked=value)
+
+    def _alpha_changed(self, value: bool) -> None:
+        if self._guard:
+            return
+        doc = self.app.doc
+        if doc is not None:
+            doc.set_layer_props(doc.active_index, lock_alpha=value)
 
     def _row_changed(self, row: int) -> None:
         if self._guard or row < 0:
@@ -234,6 +340,194 @@ class HistoryDock(QDockWidget):
         if doc is not None:
             doc.history.go_to(row)
             self.app.canvas.update()
+
+
+class AnimationDock(QDockWidget):
+    def __init__(self, app):
+        super().__init__("Animation")
+        self.app = app
+        self._guard = False
+        self._index = 0
+        self.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        self.list = QListWidget()
+        self.list.setIconSize(QSize(64, 48))
+        self.list.setMinimumHeight(120)
+        self.list.currentRowChanged.connect(self._row_changed)
+        layout.addWidget(self.list, 1)
+        duration_row = QHBoxLayout()
+        duration_row.addWidget(QLabel("Durée"))
+        self.duration = QSpinBox()
+        self.duration.setRange(20, 10000)
+        self.duration.setSingleStep(10)
+        self.duration.setValue(120)
+        self.duration.setSuffix(" ms")
+        self.duration.valueChanged.connect(self._duration_changed)
+        duration_row.addWidget(self.duration, 1)
+        layout.addLayout(duration_row)
+        frame_buttons = QHBoxLayout()
+        frame_buttons.setSpacing(3)
+        for text, tip, slot in (
+            ("+", "Capturer l'image actuelle", self._add_frame),
+            ("⧉", "Dupliquer l'image", self._duplicate_frame),
+            ("−", "Supprimer l'image", self._remove_frame),
+        ):
+            button = QToolButton()
+            button.setText(text)
+            button.setToolTip(tip)
+            button.clicked.connect(slot)
+            frame_buttons.addWidget(button)
+        layout.addLayout(frame_buttons)
+        playback = QHBoxLayout()
+        self.play_button = QPushButton("Lire")
+        self.play_button.clicked.connect(self.play)
+        self.stop_button = QPushButton("Arrêter")
+        self.stop_button.clicked.connect(self.stop)
+        self.export_button = QToolButton()
+        self.export_button.setText("Exporter")
+        self.export_button.setPopupMode(QToolButton.MenuButtonPopup)
+        export_menu = QMenu(self.export_button)
+        export_menu.addAction("GIF animé…", lambda: self._export(False))
+        export_menu.addAction("APNG animé…", lambda: self._export(True))
+        self.export_button.setMenu(export_menu)
+        self.export_button.clicked.connect(lambda: self._export(False))
+        playback.addWidget(self.play_button)
+        playback.addWidget(self.stop_button)
+        playback.addWidget(self.export_button)
+        layout.addLayout(playback)
+        self.setWidget(container)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        app.doc_changed.connect(self.refresh)
+
+    def refresh(self) -> None:
+        doc = self.app.doc
+        self._guard = True
+        self.list.clear()
+        if doc is not None:
+            for index, frame in enumerate(doc.frames):
+                item = QListWidgetItem(f"Image {index + 1}")
+                item.setIcon(QIcon(self._thumbnail(frame["image"])))
+                self.list.addItem(item)
+            if doc.frames:
+                self.list.setCurrentRow(min(self._index, len(doc.frames) - 1))
+                self.duration.setValue(doc.frames[self.list.currentRow()]["duration"])
+        self._guard = False
+
+    @staticmethod
+    def _thumbnail(image):
+        thumb = QImage(64, 48, QImage.Format_ARGB32_Premultiplied)
+        thumb.fill(QColor("#34373c"))
+        painter = QPainter(thumb)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        scaled = image.scaled(62, 46, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        painter.drawImage((64 - scaled.width()) // 2, (48 - scaled.height()) // 2, scaled)
+        painter.end()
+        return QPixmap.fromImage(thumb)
+
+    def _row_changed(self, row: int) -> None:
+        if self._guard or row < 0:
+            return
+        self._index = row
+        doc = self.app.doc
+        if doc is not None and row < len(doc.frames):
+            self._guard = True
+            self.duration.setValue(doc.frames[row]["duration"])
+            self._guard = False
+
+    def _duration_changed(self, value: int) -> None:
+        if self._guard:
+            return
+        doc = self.app.doc
+        if doc is not None and 0 <= self._index < len(doc.frames):
+            doc.frames[self._index]["duration"] = int(value)
+            doc.mark_modified(True)
+
+    def _add_frame(self) -> None:
+        doc = self.app.doc
+        if doc is None:
+            return
+        self.stop()
+        doc.frames.append({"image": doc.composite().copy(), "duration": 120})
+        doc.mark_modified(True)
+        self._index = len(doc.frames) - 1
+        self.refresh()
+        self.list.setCurrentRow(self._index)
+
+    def _duplicate_frame(self) -> None:
+        doc = self.app.doc
+        if doc is None or not doc.frames:
+            return
+        frame = doc.frames[self._index]
+        doc.frames.insert(self._index + 1,
+                          {"image": frame["image"].copy(), "duration": frame["duration"]})
+        doc.mark_modified(True)
+        self._index += 1
+        self.refresh()
+        self.list.setCurrentRow(self._index)
+
+    def _remove_frame(self) -> None:
+        doc = self.app.doc
+        if doc is None or not doc.frames:
+            return
+        del doc.frames[self._index]
+        doc.mark_modified(True)
+        self._index = max(0, self._index - 1)
+        self.refresh()
+        self.list.setCurrentRow(self._index)
+
+    def play(self) -> None:
+        doc = self.app.doc
+        if doc is None or not doc.frames:
+            return
+        self._index = 0
+        self._show_frame()
+        self.timer.setInterval(doc.frames[0]["duration"])
+        self.timer.start()
+
+    def stop(self) -> None:
+        self.timer.stop()
+        doc = self.app.doc
+        if doc is not None and doc.preview_image is not None:
+            doc.preview_image = None
+            self.app.canvas.update()
+
+    def _tick(self) -> None:
+        doc = self.app.doc
+        if doc is None or not doc.frames:
+            self.timer.stop()
+            return
+        self._index = (self._index + 1) % len(doc.frames)
+        self._show_frame()
+        self.timer.setInterval(doc.frames[self._index]["duration"])
+
+    def _show_frame(self) -> None:
+        doc = self.app.doc
+        if doc is not None and 0 <= self._index < len(doc.frames):
+            doc.preview_image = doc.frames[self._index]["image"]
+            self.app.canvas.update()
+
+    def _export(self, apng: bool) -> None:
+        doc = self.app.doc
+        if doc is None or not doc.frames:
+            self.app.notify("Aucune image d'animation")
+            return
+        suffix = "apng" if apng else "gif"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Exporter l'animation", f"animation.{suffix}",
+            "APNG (*.png)" if apng else "GIF (*.gif)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith((".png" if apng else ".gif")):
+            path += ".png" if apng else ".gif"
+        if export_animation(doc, path, apng=apng):
+            self.app.notify("Animation exportée")
+        else:
+            self.app.notify("Échec de l'export")
 
 
 class ColorDock(QDockWidget):

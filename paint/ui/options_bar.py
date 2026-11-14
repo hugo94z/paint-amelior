@@ -114,6 +114,10 @@ class OptionsBar(QWidget):
                 )
                 self.layout_box.addWidget(hardness_slider)
                 self.layout_box.addWidget(hardness_label)
+                self.layout_box.addWidget(
+                    self._check("Pression", tool.pressure_size,
+                                self._pressure_setter(tool))
+                )
             if tool_id in ("rect", "ellipse", "roundrect", "polygon"):
                 self.layout_box.addWidget(
                     self._check("Rempli (couleur d'arrière-plan)", tool.filled,
@@ -144,22 +148,71 @@ class OptionsBar(QWidget):
             self.layout_box.addWidget(gradient_slider)
             self.layout_box.addWidget(gradient_label)
         elif tool_id == "select":
-            self.layout_box.addWidget(self._label("Mode"))
+            self.layout_box.addWidget(self._label("Forme"))
             self.layout_box.addWidget(
                 self._combo([("rect", "Rectangle"), ("lasso", "Lasso")], tool.mode,
-                            lambda value: self._set_attr(tool, "mode", value), 120)
+                            lambda value: self._set_attr(tool, "mode", value), 110)
             )
-            select_all = QLabel("⏎ Glisser dans la sélection pour la déplacer")
-            select_all.setStyleSheet("color:#7f858f;")
-            self.layout_box.addWidget(select_all)
+            self.layout_box.addWidget(self._label("Mode"))
+            self.layout_box.addWidget(
+                self._combo(
+                    [("replace", "Remplacer"), ("add", "Ajouter"),
+                     ("subtract", "Soustraire"), ("intersect", "Intersection")],
+                    tool.selection_mode,
+                    lambda value: self._set_attr(tool, "selection_mode", value), 120,
+                )
+            )
+            self.layout_box.addWidget(self._label("Contour progressif"))
+            self.layout_box.addWidget(
+                self._spin(0, 200, tool.feather, " px", self._feather_setter(tool), 68)
+            )
+            hint = QLabel("Glisser dans la sélection pour la déplacer")
+            hint.setStyleSheet("color:#7f858f;")
+            self.layout_box.addWidget(hint)
+        elif tool_id == "wand":
+            self.layout_box.addWidget(self._label("Tolérance"))
+            self.layout_box.addWidget(
+                self._slider(0, 255, tool.tolerance, self._tolerance_setter(tool), 100)
+            )
+            self.layout_box.addWidget(
+                self._spin(0, 255, tool.tolerance, "", self._tolerance_setter(tool), 56)
+            )
+            self.layout_box.addWidget(
+                self._check("Contigu", tool.contiguous, self._contiguous_setter(tool))
+            )
+            self.layout_box.addWidget(
+                self._check("Tous les calques", tool.sample_all, self._sample_setter(tool))
+            )
+            self.layout_box.addWidget(self._label("Contour progressif"))
+            self.layout_box.addWidget(
+                self._spin(0, 200, tool.feather, " px", self._feather_setter(tool), 68)
+            )
+            self.layout_box.addWidget(self._label("Mode"))
+            self.layout_box.addWidget(
+                self._combo(
+                    [("replace", "Remplacer"), ("add", "Ajouter"),
+                     ("subtract", "Soustraire"), ("intersect", "Intersection")],
+                    tool.selection_mode,
+                    lambda value: self._set_attr(tool, "selection_mode", value), 120,
+                )
+            )
         elif tool_id == "text":
             self.layout_box.addWidget(
                 self._label("Cliquez sur le canevas pour saisir le texte")
             )
         elif tool_id == "picker":
+            self.layout_box.addWidget(self._label("Échantillon"))
+            self.layout_box.addWidget(
+                self._combo([(1, "1 × 1"), (3, "3 × 3"), (5, "5 × 5")], tool.sample_size,
+                            lambda value: self._set_attr(tool, "sample_size", int(value)), 90)
+            )
             self.layout_box.addWidget(
                 self._label("Cliquez pour prélever une couleur (Alt avec n'importe quel outil)")
             )
+        elif tool_id == "crop":
+            hint = QLabel("Glissez le cadre, puis Entrée pour recadrer • Échap pour annuler")
+            hint.setStyleSheet("color:#7f858f;")
+            self.layout_box.addWidget(hint)
         self.layout_box.addStretch(1)
 
     def _hint_size(self, canvas) -> None:
@@ -204,6 +257,30 @@ class OptionsBar(QWidget):
     def _tolerance_setter(self, tool):
         def setter(value):
             tool.tolerance = int(value)
+
+        return setter
+
+    def _feather_setter(self, tool):
+        def setter(value):
+            tool.feather = int(value)
+
+        return setter
+
+    def _contiguous_setter(self, tool):
+        def setter(value):
+            tool.contiguous = bool(value)
+
+        return setter
+
+    def _sample_setter(self, tool):
+        def setter(value):
+            tool.sample_all = bool(value)
+
+        return setter
+
+    def _pressure_setter(self, tool):
+        def setter(value):
+            tool.pressure_size = bool(value)
 
         return setter
 

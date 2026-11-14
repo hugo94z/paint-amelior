@@ -34,7 +34,10 @@ class GradientTool(BaseTool):
         if self._start is None:
             return
         self._end = pos
-        layer = self.doc.active_layer()
+        layer = self.paintable_layer()
+        if layer is None:
+            self._reset()
+            return
         bounds = QRectF(self._start, self._end).normalized().toAlignedRect()
         bounds = bounds.adjusted(-2, -2, 2, 2).intersected(self.doc.rect())
         if bounds.isEmpty():

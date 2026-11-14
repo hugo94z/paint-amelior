@@ -18,7 +18,7 @@ class FillTool(BaseTool):
         self.contiguous = True
 
     def press(self, pos, event) -> None:
-        layer = self.doc.active_layer()
+        layer = self.paintable_layer()
         if layer is None:
             return
         image, bounds = flood_fill(
@@ -34,8 +34,20 @@ class FillTool(BaseTool):
             return
         tx = self.doc.history.begin("Remplissage")
         tx.touch(layer, bounds)
+        mask = self.doc.mask_for_image()
+        if mask is not None:
+            local_mask = mask.copy(bounds)
+            painter = QPainter(image)
+            painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            painter.drawImage(0, 0, local_mask)
+            painter.end()
         painter = QPainter(layer.image)
-        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        if mask is not None or layer.lock_alpha:
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        else:
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+        if layer.lock_alpha:
+            painter.setCompositionMode(QPainter.CompositionMode_SourceAtop)
         painter.drawImage(bounds.topLeft(), image)
         painter.end()
         self.doc.invalidate(bounds)
@@ -49,5 +61,9 @@ class PickerTool(BaseTool):
     shortcut = "I"
     icon = "picker"
 
+    def __init__(self, app):
+        super().__init__(app)
+        self.sample_size = 1
+
     def press(self, pos, event) -> None:
-        self.app.pick_color(pos)
+        self.app.pick_color(pos, self.sample_size)

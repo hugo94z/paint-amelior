@@ -27,6 +27,7 @@ class Canvas(QWidget):
         self._ants_phase = 0
         self._checker = self._make_checker()
         self.setMouseTracking(True)
+        self.setTabletTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAcceptDrops(True)
@@ -45,6 +46,13 @@ class Canvas(QWidget):
         painter.fillRect(24, 24, 24, 24, QColor("#b9bdc4"))
         painter.end()
         return pixmap
+
+    def _background(self) -> QColor:
+        return QColor("#e4e6ea") if getattr(self.app, "light_theme", False) else QColor("#15171a")
+
+    def refresh_theme(self) -> None:
+        self._checker = self._make_checker()
+        self.update()
 
     def set_doc(self, doc) -> None:
         if self.doc is not None:
@@ -118,6 +126,17 @@ class Canvas(QWidget):
         self._auto_fit = False
         self.update()
 
+    def restore_view(self, zoom: float, pan: QPointF | None) -> None:
+        if zoom is None or pan is None:
+            self.fit()
+            return
+        self.zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, float(zoom)))
+        self.pan = QPointF(pan)
+        self._auto_fit = False
+        self.app.update_zoom_label()
+        self._notify_view()
+        self.update()
+
     def set_zoom(self, zoom: float, anchor: QPointF | None = None) -> None:
         if self.doc is None:
             return
@@ -146,7 +165,7 @@ class Canvas(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#15171a"))
+        painter.fillRect(self.rect(), self._background())
         doc = self.doc
         if doc is None:
             return
@@ -161,7 +180,10 @@ class Canvas(QWidget):
         dst = QRectF(self.doc_to_view(QPointF(source.left(), source.top())),
                      QSizeF(source.width() * self.zoom, source.height() * self.zoom))
         painter.setRenderHint(QPainter.SmoothPixmapTransform, self.zoom < 1.0)
-        painter.drawImage(dst, doc.composite(), QRectF(source))
+        painter.drawImage(dst, doc.preview_image if doc.preview_image is not None else doc.composite(),
+                          QRectF(source))
+        if doc.selection_tint is not None:
+            painter.drawImage(dst, doc.selection_tint, QRectF(source))
         painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.save()
@@ -175,8 +197,38 @@ class Canvas(QWidget):
         painter.restore()
         self._paint_ants(painter, target)
         painter.restore()
+        self._paint_grid(painter, target)
         self._paint_frame(painter, target)
         self._paint_cursor(painter)
+
+    def _paint_grid(self, painter: QPainter, target: QRectF) -> None:
+        if not getattr(self.app, "show_grid", False) or self.doc is None:
+            return
+        spacing = self.app.grid_size * self.zoom
+        if spacing < 5:
+            return
+        painter.save()
+        painter.setClipRect(target)
+        color = QColor(0, 0, 0, 40) if getattr(self.app, "light_theme", False) else QColor(255, 255, 255, 42)
+        painter.setPen(QPen(color, 1))
+        start_x = self.pan.x()
+        start_y = self.pan.y()
+        limit = 400
+        count = 0
+        x = start_x
+        while x <= target.right() and count < limit:
+            if x >= target.left():
+                painter.drawLine(QPointF(x, target.top()), QPointF(x, target.bottom()))
+            x += spacing
+            count += 1
+        count = 0
+        y = start_y
+        while y <= target.bottom() and count < limit:
+            if y >= target.top():
+                painter.drawLine(QPointF(target.left(), y), QPointF(target.right(), y))
+            y += spacing
+            count += 1
+        painter.restore()
 
     def _paint_frame(self, painter: QPainter, target: QRectF) -> None:
         painter.setPen(QPen(QColor("#3a3f46"), 1))
@@ -214,7 +266,27 @@ class Canvas(QWidget):
 
     def _paint_ants(self, painter: QPainter, target: QRectF) -> None:
         doc = self.doc
-        if doc is None or not doc.has_selection() or doc.selection_path is None:
+        if doc is None or not doc.has_selection():
+            return
+        if doc.selection_path is None:
+            bounds = doc.selection.boundingRect()
+            if bounds.isEmpty():
+                return
+            top_left = self.doc_to_view(QPointF(bounds.left(), bounds.top()))
+            bottom_right = self.doc_to_view(
+                QPointF(bounds.right() + 1, bounds.bottom() + 1)
+            )
+            rect = QRectF(top_left, bottom_right)
+            painter.save()
+            painter.setBrush(Qt.NoBrush)
+            for color, offset in ((QColor(0, 0, 0), self._ants_phase),
+                                  (QColor(255, 255, 255), self._ants_phase + 4)):
+                pen = QPen(color, 1, Qt.DashLine)
+                pen.setDashPattern([4, 4])
+                pen.setDashOffset(offset)
+                painter.setPen(pen)
+                painter.drawRect(rect)
+            painter.restore()
             return
         painter.save()
         painter.setClipRect(target)
@@ -294,6 +366,7 @@ class Canvas(QWidget):
             return
         if event.button() != Qt.LeftButton or self.doc is None:
             return
+        self.app.pressure = 1.0
         pos = self.view_to_doc(event.position())
         if event.modifiers() & Qt.AltModifier:
             self.app.pick_color(pos)
@@ -312,6 +385,10 @@ class Canvas(QWidget):
         tool = self.app.tool
         pos = self.view_to_doc(event.position())
         if event.buttons() & Qt.LeftButton:
+            if event.modifiers() & Qt.AltModifier:
+                self.app.pick_color(pos)
+                self.app.update_coords(pos)
+                return
             tool.move(pos, event)
         self.app.update_coords(pos)
         self._refresh_cursor_ring()
@@ -373,6 +450,26 @@ class Canvas(QWidget):
         self.roll_size()
         self.update()
         super().leaveEvent(event)
+
+    def tabletEvent(self, event) -> None:
+        from PySide6.QtCore import QEvent
+
+        if self.doc is None:
+            return
+        self.setFocus()
+        self._mouse = event.position()
+        self.app.pressure = max(0.05, min(1.0, float(event.pressure() or 1.0)))
+        pos = self.view_to_doc(event.position())
+        kind = event.type()
+        if kind == QEvent.TabletPress:
+            self.app.tool.press(pos, event)
+        elif kind == QEvent.TabletMove:
+            self.app.tool.move(pos, event)
+        elif kind == QEvent.TabletRelease:
+            self.app.tool.release(pos, event)
+            self.app.pressure = 1.0
+        self.app.update_coords(pos)
+        event.accept()
 
     def dragEnterEvent(self, event) -> None:
         if self.app.can_drop(event.mimeData()):

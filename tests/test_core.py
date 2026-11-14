@@ -7,10 +7,13 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QRegion
 from paint.brush import StampCache
 from paint.document import Document
 from paint.filters import apply_to_document, flood_fill
+from paint.io.exporters import export_animation, export_pdf, export_svg
 from paint.io.project_io import load_project, save_project
 from paint.layer import Layer
 from paint.tools.draw import BrushTool
 from paint.tools.select import SelectionTool
+from paint.tools.wand import MagicWandTool
+from paint import autosave
 
 
 @pytest.fixture(scope="session")
@@ -245,3 +248,100 @@ def test_reorder_layers(qapp):
     assert names_after[0] == names_before[-1]
     doc.history.undo()
     assert [layer.name for layer in doc.layers] == names_before
+
+
+def test_magic_wand_and_feather(qapp):
+    doc = Document.new(120, 120, QColor("white"))
+    fill_layer(doc.active_layer(), QRect(20, 20, 60, 60), QColor("#dc2626"))
+    doc.invalidate_all()
+    app = FakeApp(doc)
+    wand = MagicWandTool(app)
+    wand.press(QPointF(30, 30), None)
+    assert doc.has_selection()
+    assert doc.selection.boundingRect() == QRect(20, 20, 60, 60)
+    assert doc.selection_mask is not None
+    assert doc.selection_tint is not None
+    wand.feather = 5
+    wand.selection_mode = "subtract"
+    wand.press(QPointF(30, 30), None)
+    assert not doc.has_selection()
+    doc.clear_selection()
+    doc.set_selection(QRegion(QRect(10, 10, 40, 40)), None, feather=8)
+    assert doc.selection_mask is not None
+    assert doc.selection_feather == 8
+
+
+def test_crop_canvas_and_transform_selection(qapp):
+    doc = Document.new(120, 90, QColor("white"))
+    fill_layer(doc.active_layer(), QRect(10, 10, 30, 30), QColor("red"))
+    doc.invalidate_all()
+    doc.crop(QRect(5, 5, 80, 60))
+    assert doc.size == QSize(80, 60)
+    doc.history.undo()
+    assert doc.size == QSize(120, 90)
+    doc.resize_canvas(150, 100, "center")
+    assert doc.size == QSize(150, 100)
+    doc.history.undo()
+    assert doc.size == QSize(120, 90)
+    path = QPainterPath()
+    path.addRect(QRect(10, 10, 30, 30))
+    doc.set_selection(QRegion(QRect(10, 10, 30, 30)), path)
+    assert doc.transform_selection(45, 0.8, 0.8)
+    assert doc.has_selection()
+    doc.history.undo()
+    assert doc.composite().pixelColor(15, 15) == QColor("red")
+
+
+def test_layer_mask_adjustment_roundtrip(qapp, tmp_path):
+    doc = Document.new(80, 60, QColor("white"))
+    fill_layer(doc.active_layer(), QRect(0, 0, 80, 60), QColor("#2563eb"))
+    doc.invalidate_all()
+    doc.add_layer_mask(from_selection=False)
+    assert doc.active_layer().mask is not None
+    doc.add_adjustment_layer("brightness", 1.3)
+    assert doc.active_layer().adjustment["type"] == "brightness"
+    path = tmp_path / "masked.paint"
+    assert save_project(doc, path)
+    loaded = load_project(path)
+    assert loaded is not None
+    masks = [layer for layer in loaded.layers if layer.mask is not None]
+    adjustments = [layer for layer in loaded.layers if layer.adjustment is not None]
+    assert masks and adjustments
+
+
+def test_exporters(qapp, tmp_path):
+    doc = Document.new(60, 40, QColor("white"))
+    fill_layer(doc.active_layer(), QRect(0, 0, 60, 40), QColor("#10b981"))
+    doc.invalidate_all()
+    doc.frames = [{"image": doc.composite().copy(), "duration": 100}]
+    fill_layer(doc.active_layer(), QRect(0, 0, 30, 20), QColor("#111827"))
+    doc.invalidate_all()
+    doc.frames.append({"image": doc.composite().copy(), "duration": 120})
+    gif = tmp_path / "anim.gif"
+    apng = tmp_path / "anim.png"
+    pdf = tmp_path / "doc.pdf"
+    svg = tmp_path / "doc.svg"
+    assert export_animation(doc, gif)
+    assert export_animation(doc, apng, apng=True)
+    assert export_pdf(doc, pdf)
+    assert export_svg(doc, svg)
+    for path in (gif, apng, pdf, svg):
+        assert path.is_file() and path.stat().st_size > 0
+
+
+def test_autosave_roundtrip(qapp, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    doc = Document.new(50, 40, QColor("white"))
+    fill_layer(doc.active_layer(), QRect(0, 0, 20, 20), QColor("red"))
+    doc.invalidate_all()
+    slot = autosave.new_slot()
+    assert autosave.write(doc, slot, "Sans titre 1")
+    assert doc.path is None
+    pending = autosave.entries()
+    assert pending
+    recovered = autosave.load(pending[0], 1_000_000)
+    assert recovered is not None
+    assert recovered.size == QSize(50, 40)
+    assert recovered.path is None
+    autosave.clear(slot)
+    assert not autosave.entries()

@@ -1,9 +1,11 @@
 from .draw import BrushTool, EraserTool
+from .crop import CropTool
 from .fill import FillTool, PickerTool
 from .gradient import GradientTool
 from .select import SelectionTool
 from .shapes import PolygonTool, ShapeTool
 from .text_tool import TextTool
+from .wand import MagicWandTool
 
 
 def build_tools(app):
@@ -20,4 +22,6 @@ def build_tools(app):
         GradientTool(app),
         TextTool(app),
         SelectionTool(app),
+        MagicWandTool(app),
+        CropTool(app),
     ]

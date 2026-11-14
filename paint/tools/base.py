@@ -54,3 +54,12 @@ class BaseTool:
 
     def notify(self, message: str) -> None:
         self.app.notify(message)
+
+    def paintable_layer(self):
+        layer = self.doc.active_layer()
+        if layer is None:
+            return None
+        if layer.locked:
+            self.notify("Calque verrouillé")
+            return None
+        return layer

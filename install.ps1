@@ -60,6 +60,7 @@ trap {
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor DarkCyan
 Write-Host "   Paint Ameliore - Installateur Windows" -ForegroundColor White
+Write-Host "   Version 1.5.0" -ForegroundColor Gray
 Write-Host "==================================================" -ForegroundColor DarkCyan
 Write-Host ""
 
@@ -228,6 +229,25 @@ if (-not $NoShortcut) {
     }
     Ok "Raccourcis Bureau et menu Demarrer"
 }
+
+Step "Enregistrement dans Windows"
+$uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PaintAmeliore"
+New-Item -Path $uninstallKey -Force | Out-Null
+Set-ItemProperty -Path $uninstallKey -Name "DisplayName" -Value "Paint Ameliore"
+Set-ItemProperty -Path $uninstallKey -Name "DisplayVersion" -Value "1.5.0"
+Set-ItemProperty -Path $uninstallKey -Name "Publisher" -Value "hugo94z"
+Set-ItemProperty -Path $uninstallKey -Name "InstallLocation" -Value $InstallDir
+Set-ItemProperty -Path $uninstallKey -Name "DisplayIcon" -Value "$pythonw,0"
+Set-ItemProperty -Path $uninstallKey -Name "UninstallString" -Value "powershell -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $appDir 'uninstall.ps1')`""
+$classes = "HKCU:\Software\Classes"
+$progId = "PaintAmeliore.paint"
+New-Item -Path "$classes\$progId\shell\open\command" -Force | Out-Null
+Set-Item -Path "$classes\$progId" -Value "Document Paint Ameliore"
+Set-Item -Path "$classes\$progId\shell\open\command" `
+    -Value "`"$pythonw`" `"$launcherPy`" `"%1`""
+New-Item -Path "$classes\.paint" -Force | Out-Null
+Set-Item -Path "$classes\.paint" -Value $progId
+Ok "Association .paint et entree Ajout/Suppression de programmes"
 
 if ($downloaded -and (Test-Path $tempRoot)) {
     Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

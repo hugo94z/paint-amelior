@@ -20,9 +20,20 @@ def _from_pil(image: Image.Image) -> QImage:
     return img.copy().convertToFormat(QImage.Format_ARGB32_Premultiplied)
 
 
-def apply(image: QImage, name: str, value: float = 0.0, extra: float = 0.0) -> QImage:
+def apply(image: QImage, name: str, value: float = 0.0, extra: float = 0.0,
+          options: dict | None = None) -> QImage:
+    options = options or {}
     if name == "invert":
         return _invert(image)
+    if name == "levels":
+        return _levels(image, options.get("black", 0.0), options.get("white", 255.0),
+                       options.get("gamma", 1.0))
+    if name == "hue":
+        return _hue(image, options.get("shift", 0.0))
+    if name == "vignette":
+        return _vignette(image, options.get("strength", 0.6))
+    if name == "motionblur":
+        return _motion_blur(image, options.get("angle", 0.0), options.get("distance", 12.0))
     pil = _to_pil(image)
     if name == "blur":
         result = pil.filter(ImageFilter.GaussianBlur(max(0.1, value)))
@@ -60,9 +71,67 @@ def _invert(image: QImage) -> QImage:
     return array_to_image(arr)
 
 
-def apply_to_document(doc, name: str, value: float = 0.0, label: str | None = None) -> bool:
+def _levels(image: QImage, black: float, white: float, gamma: float) -> QImage:
+    import numpy as np
+
+    _, arr = image_to_array(image)
+    black = max(0.0, min(254.0, float(black)))
+    white = max(black + 1.0, min(255.0, float(white)))
+    gamma = max(0.05, float(gamma))
+    rgb = arr[:, :, :3].astype(np.float32)
+    normalized = np.clip((rgb - black) / (white - black), 0.0, 1.0)
+    arr[:, :, :3] = (np.power(normalized, 1.0 / gamma) * 255.0).astype(np.uint8)
+    return array_to_image(arr)
+
+
+def _hue(image: QImage, shift: float) -> QImage:
+    pil = _to_pil(image)
+    hsv = pil.convert("HSV")
+    h, s, v = hsv.split()
+    offset = int(round(shift)) % 256
+    h = h.point(lambda value: (value + offset) % 256)
+    merged = Image.merge("HSV", (h, s, v)).convert("RGBA")
+    return _from_pil(merged)
+
+
+def _vignette(image: QImage, strength: float) -> QImage:
+    import numpy as np
+
+    _, arr = image_to_array(image)
+    height, width = arr.shape[:2]
+    yy, xx = np.ogrid[:height, :width]
+    cx, cy = width / 2.0, height / 2.0
+    dist = np.sqrt(((xx - cx) / max(1.0, cx)) ** 2 + ((yy - cy) / max(1.0, cy)) ** 2)
+    dist = np.clip(dist / np.sqrt(2.0), 0.0, 1.0)
+    factor = 1.0 - max(0.0, min(1.0, float(strength))) * (dist ** 2)
+    arr[:, :, :3] = (arr[:, :, :3].astype(np.float32) * factor[:, :, None]).astype(np.uint8)
+    return array_to_image(arr)
+
+
+def _motion_blur(image: QImage, angle: float, distance: float) -> QImage:
+    import math
+
+    import numpy as np
+
+    _, arr = image_to_array(image)
+    steps = max(2, int(abs(distance) // 2))
+    dx = math.cos(math.radians(angle)) * (distance / steps)
+    dy = math.sin(math.radians(angle)) * (distance / steps)
+    acc = np.zeros_like(arr, dtype=np.float32)
+    for step in range(steps):
+        offset_x = int(round(dx * step))
+        offset_y = int(round(dy * step))
+        acc += np.roll(np.roll(arr, offset_y, axis=0), offset_x, axis=1)
+    arr[:, :, :] = (acc / steps).astype(np.uint8)
+    return array_to_image(arr)
+
+
+def apply_to_document(doc, name: str, value: float = 0.0, label: str | None = None,
+                      options: dict | None = None) -> bool:
     layer = doc.active_layer()
     if layer is None:
+        return False
+    if layer.locked:
         return False
     tx = doc.history.begin(label or ("Filtre " + name))
     bounds = doc.selection_bounds()
@@ -72,14 +141,26 @@ def apply_to_document(doc, name: str, value: float = 0.0, label: str | None = No
     if name == "invert":
         result = _invert(layer.image)
     else:
-        result = apply(layer.image, name, value)
+        result = apply(layer.image, name, value, options=options)
     from PySide6.QtGui import QPainter
 
+    mask = doc.mask_for_image()
+    if mask is not None:
+        masked = result.copy()
+        mask_painter = QPainter(masked)
+        mask_painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        mask_painter.drawImage(0, 0, mask)
+        mask_painter.end()
+        result = masked
     painter = QPainter(layer.image)
-    if doc.has_selection():
-        painter.setClipRegion(doc.selection)
-    painter.setCompositionMode(QPainter.CompositionMode_Source)
-    painter.drawImage(0, 0, result)
+    if mask is not None:
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        painter.drawImage(0, 0, result)
+    else:
+        if doc.has_selection():
+            painter.setClipRegion(doc.selection)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.drawImage(0, 0, result)
     painter.end()
     doc.invalidate(bounds)
     tx.commit()
@@ -97,7 +178,7 @@ def fill_color(image: QImage, rect: QRect, color: QColor) -> QImage:
     return out
 
 
-def _flood_fill_mask(image: QImage, x: int, y: int, tolerance: int, clip) -> "object":
+def flood_mask(image: QImage, x: int, y: int, tolerance: int, clip=None):
     import numpy as np
 
     _, arr = image_to_array(image)
@@ -159,13 +240,24 @@ def _flood_fill_mask(image: QImage, x: int, y: int, tolerance: int, clip) -> "ob
     return filled
 
 
-def flood_fill(image: QImage, x: int, y: int, color: QColor, tolerance: int = 0,
-               clip_region=None) -> tuple[QImage | None, QRect]:
+def color_range_mask(image: QImage, color: QColor, tolerance: int):
     import numpy as np
 
+    _, arr = image_to_array(image)
+    target = np.array(color_bgra(color), dtype=np.int16)
+    diff = np.zeros(arr.shape[:2], np.uint8)
+    for channel in range(4):
+        channel_diff = np.abs(arr[:, :, channel].astype(np.int16) - int(target[channel]))
+        channel_diff = channel_diff.astype(np.uint8)
+        np.maximum(diff, channel_diff, out=diff)
+    return diff <= tolerance
+
+
+def flood_fill(image: QImage, x: int, y: int, color: QColor, tolerance: int = 0,
+               clip_region=None) -> tuple[QImage | None, QRect]:
     height, width = image.height(), image.width()
     clip = region_mask(clip_region, width, height)
-    mask = _flood_fill_mask(image, x, y, int(tolerance), clip)
+    mask = flood_mask(image, x, y, int(tolerance), clip)
     if mask is None or not mask.any():
         return None, QRect()
     bounds = mask_bbox(mask)

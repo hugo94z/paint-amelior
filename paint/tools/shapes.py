@@ -53,7 +53,10 @@ class ShapeTool(BaseTool):
     def press(self, pos, event) -> None:
         self._start = pos
         self._end = pos
-        self._layer = self.doc.active_layer()
+        self._layer = self.paintable_layer()
+        if self._layer is None:
+            self._start = None
+            return
         self._tx = self.doc.history.begin(self.label)
         self.app.canvas.update()
 
@@ -181,7 +184,12 @@ class PolygonTool(BaseTool):
         if len(self._points) < 3:
             self.cancel()
             return
-        layer = self.doc.active_layer()
+        layer = self.paintable_layer()
+        if layer is None:
+            self._points = []
+            self._cursor = None
+            self.app.canvas.update()
+            return
         path = QPainterPath()
         path.moveTo(self._points[0])
         for point in self._points[1:]:

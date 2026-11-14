@@ -2,22 +2,25 @@
 
 ![tests](https://github.com/hugo94z/paint-amelior/actions/workflows/tests.yml/badge.svg)
 
-Clone de Paint réécrit en Python, avec PySide6 et numpy. Pensé pour être **plus rapide** qu'un Paint classique et **plus agréable** au quotidien : calques, sélection, filtres, zoom fluide, raccourcis clavier.
+Clone de Paint réécrit en Python, avec PySide6 et numpy. Pensé pour être **plus rapide** qu'un Paint classique et **plus agréable** au quotidien : onglets, calques, sélection avancée, filtres avec aperçu, animation et installateur Windows.
 
 ## Fonctionnalités
 
-- **Pinceau / gomme** avec taille, opacité, dureté, espacement des tampons et aperçu du trait.
-- **Pot de peinture** vectorisé numpy (remplissage par régions, tolérance réglable, respect de la sélection).
+- **Multi-documents** : onglets, zoom et historique indépendants, fermeture protégée.
+- **Pinceau / gomme** : taille, opacité, dureté, espacement, **pression de tablette**, ligne droite `Maj+clic`, aperçu du trait.
+- **Pot de peinture** vectorisé numpy, tolérance, respect des sélections et des masques.
 - **Formes** : ligne, rectangle, ellipse, rectangle arrondi, polygone, dégradé linéaire/radial.
-- **Texte** avec police, taille, gras, italique, retour à la ligne automatique.
-- **Sélection** rectangle et lasso, déplacement des pixels, copier/couper/coller, effacement, inversion (`Ctrl+Maj+I`), fourmis animées.
-- **Calques** : ajout, duplication, suppression, réorganisation par glisser-déposer, fusion vers le bas, opacité, modes de fusion, vignettes.
-- **Filtres** : flou gaussien, netteté, luminosité, contraste, saturation, niveaux de gris, pixelisation, inversion.
-- **Historique par tuiles** avec budget mémoire configurable (annuler/rétablir illimité en pratique).
-- **Image** : redimensionnement, rotations 90°/180°, miroirs horizontal/vertical, avec annulation.
-- **Formats** : projet `.paint` non destructif (zip + PNG par calque) et export PNG/JPEG/WebP/BMP/TIFF.
-- **Zoom** 5 % à 3200 % centré sur le curseur, ascenseurs, déplacement au clavier/souris, ajustement automatique, sélecteur de zoom dans la barre d'état.
-- **Confort** : glisser-déposer un fichier image, documents récents, session mémorisée (fenêtre, docks, outil, couleurs), pinceau en ligne droite avec `Maj+clic`, thème sombre.
+- **Texte** avec police, taille, gras, italique, retour à la ligne.
+- **Sélection avancée** : rectangle, lasso, **baguette magique** (contigu/global, tous calques), **contour progressif**, modes remplacer/ajouter/soustraire/intersecter, inversion, déplacement, copier/couper/coller, **transformation** (rotation, échelle, miroirs).
+- **Recadrage** avec règle des tiers et **taille du canevas** avec ancrage.
+- **Calques** : vignettes, glisser-déposer, duplication, fusion, **masques de fusion**, **calques de réglage non destructifs**, verrouillage, verrouillage alpha, 12 modes de fusion.
+- **Filtres avec aperçu en direct** : flou gaussien, netteté, luminosité, contraste, saturation, **niveaux**, **teinte**, **vignettage**, **flou directionnel**, niveaux de gris, pixelisation, inversion.
+- **Historique par tuiles** avec budget mémoire configurable, annuler/rétablir.
+- **Image** : redimensionnement, rotations 90°/180°, miroirs, recadrage, taille du canevas — tous annulables.
+- **Formats** : projet `.paint` (calques, masques, réglages, images d'animation), export PNG/JPEG/WebP/BMP/TIFF, **PDF**, **SVG**, **GIF/APNG**, import **PSD aplati**, **traitement par lot** (UI et CLI).
+- **Animation** : capture d'images, durée par image, lecture, export GIF/APNG.
+- **Confort** : onglets, glisser-déposer, documents récents, **autosave et récupération après crash**, grille, thème clair/sombre, palette de commandes `Ctrl+K`, plugins Python, vérification des mises à jour.
+- **Zoom** 5 % à 3200 %, ascenseurs, sélecteur de zoom, ajustement automatique.
 
 ## Installation depuis GitHub
 
@@ -73,6 +76,7 @@ python -m venv .venv
 | Pinceau / Gomme / Pot / Pipette | `B` `E` `G` `I` |
 | Ligne / Rectangle / Ellipse / Arrondi | `L` `R` `O` `U` |
 | Polygone / Dégradé / Texte / Sélection | `Y` `D` `T` `M` |
+| Baguette magique / Recadrage | `W` / `C` |
 | Taille du pinceau | `[` `]` |
 | Ligne droite au pinceau | `Maj+clic` |
 | Pipette temporaire | `Alt` |
@@ -81,24 +85,33 @@ python -m venv .venv
 | Copier / Couper / Coller | `Ctrl+C` `Ctrl+X` `Ctrl+V` |
 | Tout sélectionner / Désélectionner | `Ctrl+A` / `Ctrl+D` |
 | Inverser la sélection | `Ctrl+Maj+I` |
+| Transformer la sélection | `Ctrl+T` |
+| Palette de commandes | `Ctrl+K` |
+| Grille | `Ctrl+G` |
 | Nouveau / Ouvrir / Enregistrer | `Ctrl+N` `Ctrl+O` `Ctrl+S` |
 | Zoom / ajuster / taille réelle | `Ctrl+molette` / `Ctrl+0` / `Ctrl+1` |
 | Déplacement du canevas | `Espace + glisser` ou bouton du milieu |
 | Ouvrir une image | glisser-déposer sur le canevas |
+| Recadrer | outil `C` puis `Entrée` |
 
 ## Architecture
 
 ```
 paint/
-  app.py            fenêtre, menus, actions, E/S, session, fichiers récents
-  canvas.py         rendu : zoom, pan, dirty-rect, fourmis, ascenseurs
-  document.py       calques, composite mis en cache, sélection, transformations
+  app.py            fenêtre, onglets, menus, actions, E/S, session
+  canvas.py         rendu : zoom, pan, dirty-rect, fourmis, grille, tablette
+  document.py       calques, masques, réglages, sélection, transformations
   history.py        transactions et historique par tuiles 128×128
   brush.py          tampons, cache LRU, buffer de trait
   filters.py        flood fill numpy + filtres Pillow
+  autosave.py       sauvegarde de secours et récupération
+  batch.py          conversion par lot (UI et CLI)
   hardware.py       détection matérielle et allocation
+  plugins.py        chargement des plugins Python
+  updater.py        vérification des releases GitHub
+  io/               images, projets, PDF/SVG, animations
   tools/            un outil par fichier
-  ui/               toolbar, options, docks, thème, icônes
+  ui/               toolbar, options, docks, thème, icônes, filtres
 ```
 
 Choix de performance :
@@ -125,7 +138,39 @@ python -m pytest tests -q
 python benchmarks\bench.py
 ```
 
+Tests automatisés sur Python 3.11, 3.12 et 3.13 via GitHub Actions.
+
 ## Formats
 
-- **.paint** : archive zip contenant `project.json` et un PNG par calque (opacité, mode de fusion, visibilité, ordre et calque actif).
+- **.paint** : archive zip contenant `project.json`, un PNG par calque, les masques et les images d'animation.
 - **PNG** (transparence conservée), **JPEG/BMP** (fond blanc automatique), **WebP**, **TIFF**.
+- **PDF** (page à la taille de l'image), **SVG**, **GIF/APNG** depuis les images d'animation.
+- **PSD** : import de l'image aplatie.
+- **Traitement par lot** : `python -m paint.batch source sortie --width 1920 --format jpg`.
+
+## Animation
+
+Le dock **Animation** (Affichage → Animation) permet de capturer l'image courante, dupliquer, régler la durée, lire la séquence et exporter en GIF ou APNG.
+
+## Autosave et récupération
+
+Les documents modifiés sont sauvegardés toutes les 90 secondes dans `%LOCALAPPDATA%\PaintAmeliore\autosave`. Au démarrage suivant, l'application propose de restaurer les documents retrouvés après un arrêt brutal. Une sauvegarde normale efface l'autosave correspondant.
+
+## Plugins
+
+Déposez un fichier `.py` dans `plugins/` exposant `register(api)`. L'API fournit `api.add_action(texte, callback, raccourci)`, `api.document` et `api.notify`. Exemple fourni : `plugins/exemple.py`.
+
+## Build et publication
+
+```powershell
+.\build.ps1                 # executable autonome + dist\Paint-Ameliore-win64.zip
+```
+
+Un tag `v1.5.0` déclenche le workflow GitHub Actions qui construit l'exécutable et publie la release ; l'application vérifie ensuite les mises à jour via l'API GitHub. Un manifeste winget est fourni dans `packaging/winget/`.
+
+## Limites connues (1.5)
+
+- Les **groupes de calques** et **styles de calque** (ombre/contour) ne sont pas encore implémentés.
+- Import PSD **aplati** uniquement (pas de calques PSD).
+- Interface en français uniquement.
+- Règles/repères avec magnétisme non inclus (grille d'affichage disponible).
