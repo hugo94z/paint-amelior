@@ -60,7 +60,7 @@ trap {
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor DarkCyan
 Write-Host "   Paint Ameliore - Installateur Windows" -ForegroundColor White
-Write-Host "   Version 1.5.0" -ForegroundColor Gray
+Write-Host "   Version 1.6.5" -ForegroundColor Gray
 Write-Host "==================================================" -ForegroundColor DarkCyan
 Write-Host ""
 
