@@ -727,6 +727,7 @@ class Document(QObject):
         self.mark_modified(True)
 
     def _recomposite(self, rect: QRect) -> None:
+        self._repair_groups()
         painter = QPainter(self._cache)
         painter.setCompositionMode(QPainter.CompositionMode_Source)
         painter.fillRect(rect, Qt.transparent)
