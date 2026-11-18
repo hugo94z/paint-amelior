@@ -4,7 +4,14 @@ from PySide6.QtCore import QRect
 from PySide6.QtGui import QColor, QImage
 from PIL import Image, ImageEnhance, ImageFilter
 
-from .utils import array_to_image, color_bgra, image_to_array, mask_bbox, region_mask
+from .utils import (
+    array_to_image,
+    color_bgra,
+    image_array_view,
+    image_to_array,
+    mask_bbox,
+    region_mask,
+)
 
 
 def _to_pil(image: QImage) -> Image.Image:
@@ -138,29 +145,32 @@ def apply_to_document(doc, name: str, value: float = 0.0, label: str | None = No
     if not doc.has_selection():
         bounds = doc.rect()
     tx.touch(layer, bounds)
+    full = bounds == doc.rect()
+    source = layer.image if full else layer.image.copy(bounds)
     if name == "invert":
-        result = _invert(layer.image)
+        result = _invert(source)
     else:
-        result = apply(layer.image, name, value, options=options)
+        result = apply(source, name, value, options=options)
     from PySide6.QtGui import QPainter
 
     mask = doc.mask_for_image()
     if mask is not None:
+        local_mask = mask if full else mask.copy(bounds)
         masked = result.copy()
         mask_painter = QPainter(masked)
         mask_painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-        mask_painter.drawImage(0, 0, mask)
+        mask_painter.drawImage(0, 0, local_mask)
         mask_painter.end()
         result = masked
     painter = QPainter(layer.image)
     if mask is not None:
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-        painter.drawImage(0, 0, result)
+        painter.drawImage(bounds.topLeft(), result)
     else:
         if doc.has_selection():
             painter.setClipRegion(doc.selection)
         painter.setCompositionMode(QPainter.CompositionMode_Source)
-        painter.drawImage(0, 0, result)
+        painter.drawImage(bounds.topLeft(), result)
     painter.end()
     doc.invalidate(bounds)
     tx.commit()
@@ -178,90 +188,112 @@ def fill_color(image: QImage, rect: QRect, color: QColor) -> QImage:
     return out
 
 
-def flood_mask(image: QImage, x: int, y: int, tolerance: int, clip=None):
+def _diff_mask(arr, target, tolerance: int):
     import numpy as np
 
-    _, arr = image_to_array(image)
+    if tolerance <= 0:
+        packed = arr.view(np.uint32)[..., 0]
+        value = int.from_bytes(np.asarray(target, dtype=np.uint8).tobytes(), "little")
+        return packed == value
+    diff = np.zeros(arr.shape[:2], np.uint8)
+    for channel in range(4):
+        values = arr[:, :, channel]
+        np.maximum(diff, np.maximum(values, target[channel]) - np.minimum(
+            values, target[channel]), out=diff)
+    return diff <= tolerance
+
+
+def _mask_from_array(arr, x: int, y: int, tolerance: int, clip=None):
+    import numpy as np
+
     height, width = arr.shape[:2]
     if not (0 <= x < width and 0 <= y < height):
         return None
-    target = arr[y, x].astype(np.int16)
-    diff = np.zeros((height, width), np.uint8)
-    for channel in range(4):
-        channel_diff = np.abs(arr[:, :, channel].astype(np.int16) - int(target[channel]))
-        channel_diff = channel_diff.astype(np.uint8)
-        np.maximum(diff, channel_diff, out=diff)
-    match = diff <= tolerance
+    match = _diff_mask(arr, arr[y, x], tolerance)
     if clip is not None:
         match &= clip
     if not match[y, x]:
         return None
-
     if match.all():
         return np.ones((height, width), bool)
+    return _scanline(match, x, y)
 
-    cache: dict = {}
 
-    def runs(row: int):
-        r = cache.get(row)
-        if r is None:
-            line = match[row]
-            d = np.diff(np.concatenate(([0], line.view(np.int8), [0])))
-            r = (np.flatnonzero(d == 1), np.flatnonzero(d == -1))
-            cache[row] = r
-        return r
+def _scanline(match, x: int, y: int):
+    from bisect import bisect_left, bisect_right
 
-    start_end = runs(y)
-    index = int(np.searchsorted(start_end[0], x, side="right")) - 1
-    if index < 0 or x >= start_end[1][index]:
+    import numpy as np
+
+    height, width = match.shape
+    padded = np.zeros((height, width + 2), np.int8)
+    padded[:, 1:-1] = match
+    diff = np.diff(padded, axis=1)
+    stride = width + 1
+    starts = (np.flatnonzero(diff.ravel() == 1) % stride).tolist()
+    ends = (np.flatnonzero(diff.ravel() == -1) % stride).tolist()
+    counts = (diff == 1).sum(axis=1)
+    offsets = np.zeros(height + 1, np.int64)
+    np.cumsum(counts, out=offsets[1:])
+    offsets = offsets.tolist()
+
+    begin = offsets[y]
+    end = offsets[y + 1]
+    index = bisect_right(starts[begin:end], x) - 1
+    if index < 0 or x >= ends[begin + index]:
         return None
 
     filled = np.zeros((height, width), bool)
-    visited: set = set()
+    visited: set = {(y, index)}
     stack = [(y, index)]
     while stack:
         row, idx = stack.pop()
-        if (row, idx) in visited:
-            continue
-        visited.add((row, idx))
-        starts, ends = runs(row)
-        left = int(starts[idx])
-        right = int(ends[idx])
+        begin = offsets[row]
+        left = starts[begin + idx]
+        right = ends[begin + idx]
         filled[row, left:right] = True
         for neighbor in (row - 1, row + 1):
             if not (0 <= neighbor < height):
                 continue
-            nstarts, nends = runs(neighbor)
-            i0 = int(np.searchsorted(nends, left, side="right"))
-            i1 = int(np.searchsorted(nstarts, right, side="left"))
+            nb = offsets[neighbor]
+            ne = offsets[neighbor + 1]
+            if nb == ne:
+                continue
+            nstarts = starts[nb:ne]
+            nends = ends[nb:ne]
+            i0 = bisect_right(nends, left)
+            i1 = bisect_left(nstarts, right)
             for j in range(i0, max(i0, i1)):
-                if (neighbor, j) not in visited:
-                    stack.append((neighbor, j))
+                key = (neighbor, j)
+                if key not in visited:
+                    visited.add(key)
+                    stack.append(key)
     return filled
 
 
-def color_range_mask(image: QImage, color: QColor, tolerance: int):
-    import numpy as np
+def flood_mask(image: QImage, x: int, y: int, tolerance: int, clip=None):
+    _, arr = image_array_view(image)
+    return _mask_from_array(arr, x, y, int(tolerance), clip)
 
-    _, arr = image_to_array(image)
-    target = np.array(color_bgra(color), dtype=np.int16)
-    diff = np.zeros(arr.shape[:2], np.uint8)
-    for channel in range(4):
-        channel_diff = np.abs(arr[:, :, channel].astype(np.int16) - int(target[channel]))
-        channel_diff = channel_diff.astype(np.uint8)
-        np.maximum(diff, channel_diff, out=diff)
-    return diff <= tolerance
+
+def color_range_mask(image: QImage, color: QColor, tolerance: int):
+    _, arr = image_array_view(image)
+    return _diff_mask(arr, np.array(color_bgra(color), dtype=np.uint8), int(tolerance))
 
 
 def flood_fill(image: QImage, x: int, y: int, color: QColor, tolerance: int = 0,
                clip_region=None) -> tuple[QImage | None, QRect]:
+    import numpy as np
+
     height, width = image.height(), image.width()
     clip = region_mask(clip_region, width, height)
-    mask = flood_mask(image, x, y, int(tolerance), clip)
+    _, arr = image_array_view(image)
+    mask = _mask_from_array(arr, x, y, int(tolerance), clip)
     if mask is None or not mask.any():
         return None, QRect()
     bounds = mask_bbox(mask)
-    _, arr = image_to_array(image)
-    arr[mask] = color_bgra(color)
-    crop = arr[bounds.top(): bounds.bottom() + 1, bounds.left(): bounds.right() + 1]
+    crop = np.ascontiguousarray(
+        arr[bounds.top(): bounds.bottom() + 1, bounds.left(): bounds.right() + 1])
+    local = mask[bounds.top(): bounds.bottom() + 1, bounds.left(): bounds.right() + 1]
+    packed = crop.view(np.uint32)[..., 0]
+    packed[local] = int.from_bytes(bytes(color_bgra(color)), "little")
     return array_to_image(crop), bounds

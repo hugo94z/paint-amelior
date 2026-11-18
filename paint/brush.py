@@ -68,21 +68,50 @@ class StrokeBuffer:
         self.image.fill(Qt.transparent)
         self.dirty = QRect()
 
+    def prepare(self) -> None:
+        if not self.dirty.isEmpty():
+            painter = QPainter(self.image)
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.fillRect(self.dirty, Qt.transparent)
+            painter.end()
+        self.dirty = QRect()
+
     def reset(self) -> None:
         self.image.fill(Qt.transparent)
         self.dirty = QRect()
 
     def stamp(self, image: QImage, center: QPointF) -> QRect:
+        return self.stamp_many(image, [center])
+
+    def stamp_many(self, image: QImage, centers) -> QRect:
         half = image.width() / 2.0
-        x = int(round(center.x() - half))
-        y = int(round(center.y() - half))
+        rect = QRect()
         painter = QPainter(self.image)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-        painter.drawImage(x, y, image)
+        for center in centers:
+            x = int(round(center.x() - half))
+            y = int(round(center.y() - half))
+            painter.drawImage(x, y, image)
+            stamp_rect = QRect(x, y, image.width(), image.height())
+            rect = stamp_rect if rect.isNull() else rect.united(stamp_rect)
         painter.end()
-        rect = QRect(x, y, image.width(), image.height())
-        self.dirty = rect if self.dirty.isNull() else self.dirty.united(rect)
+        if not rect.isNull():
+            self.dirty = rect if self.dirty.isNull() else self.dirty.united(rect)
         return rect
+
+
+_BUFFERS: dict[tuple[int, int], StrokeBuffer] = {}
+
+
+def acquire_buffer(size: QSize) -> StrokeBuffer:
+    key = (size.width(), size.height())
+    buffer = _BUFFERS.get(key)
+    if buffer is None:
+        buffer = StrokeBuffer(size)
+        _BUFFERS[key] = buffer
+    else:
+        buffer.prepare()
+    return buffer
 
 
 def stamps_along(start: QPointF, end: QPointF, spacing: float):

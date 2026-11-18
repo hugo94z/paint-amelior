@@ -43,23 +43,38 @@ BLEND = {
 
 
 class ImageTransformCommand:
-    def __init__(self, label: str, layers, before, after, before_size: QSize, after_size: QSize):
+    def __init__(self, label: str, layers, before, after, before_size: QSize, after_size: QSize,
+                 before_masks=None, after_masks=None, before_dpi=None, after_dpi=None):
         self.label = label
         self.layers = list(layers)
         self.before = list(before)
         self.after = list(after)
+        self.before_masks = list(before_masks) if before_masks is not None else None
+        self.after_masks = list(after_masks) if after_masks is not None else None
         self.before_size = QSize(before_size)
         self.after_size = QSize(after_size)
+        self.before_dpi = before_dpi
+        self.after_dpi = after_dpi
 
     def nbytes(self) -> int:
-        return sum(image.sizeInBytes() for image in self.before) + sum(
+        total = sum(image.sizeInBytes() for image in self.before) + sum(
             image.sizeInBytes() for image in self.after
         )
+        for masks in (self.before_masks, self.after_masks):
+            total += sum(mask.sizeInBytes() for mask in (masks or []) if mask is not None)
+        return total
 
     def restore(self, doc, use_before: bool) -> None:
         images = self.before if use_before else self.after
-        for layer, image in zip(self.layers, images):
+        masks = self.before_masks if use_before else self.after_masks
+        for index, (layer, image) in enumerate(zip(self.layers, images)):
             layer.image = image
+            if masks is not None:
+                layer.mask = masks[index]
+        if use_before and self.before_dpi is not None:
+            doc.dpi = self.before_dpi
+        elif not use_before and self.after_dpi is not None:
+            doc.dpi = self.after_dpi
         doc.restore_image_state(self.before_size if use_before else self.after_size)
 
 
@@ -71,9 +86,11 @@ class Document(QObject):
     modified_changed = Signal(bool)
     size_changed = Signal()
 
-    def __init__(self, size: QSize, parent=None, undo_budget: int = 400 * 1024 * 1024):
+    def __init__(self, size: QSize, parent=None, undo_budget: int = 400 * 1024 * 1024,
+                 dpi: int = 96):
         super().__init__(parent)
         self._size = QSize(max(1, size.width()), max(1, size.height()))
+        self.dpi = max(36, min(1200, int(dpi)))
         self.layers: list[Layer] = []
         self.active_index = -1
         self.selection: QRegion | None = None
@@ -94,8 +111,8 @@ class Document(QObject):
 
     @classmethod
     def new(cls, width: int = 1600, height: int = 1000, background: QColor | None = None,
-            undo_budget: int = 400 * 1024 * 1024) -> "Document":
-        doc = cls(QSize(width, height), undo_budget=undo_budget)
+            undo_budget: int = 400 * 1024 * 1024, dpi: int = 96) -> "Document":
+        doc = cls(QSize(width, height), undo_budget=undo_budget, dpi=dpi)
         doc.add_layer_raw(Layer("Arrière-plan", doc.size,
                                 background if background is not None else Qt.transparent))
         if background is not None:
@@ -253,22 +270,38 @@ class Document(QObject):
         if not 0 <= index < len(self.layers):
             return
         layer = self.layers[index]
+        visual = False
+        refresh = False
         if opacity is not None:
-            layer.opacity = max(0.0, min(1.0, opacity))
-        if blend is not None and blend in BLEND:
+            value = max(0.0, min(1.0, opacity))
+            if value != layer.opacity:
+                layer.opacity = value
+                visual = True
+        if blend is not None and blend in BLEND and blend != layer.blend:
             layer.blend = blend
-        if visible is not None:
+            visual = True
+        if visible is not None and bool(visible) != layer.visible:
             layer.visible = bool(visible)
-        if name is not None and name:
+            visual = True
+        if name is not None and name and name != layer.name:
             layer.name = name
-        if locked is not None:
+            refresh = True
+        if locked is not None and bool(locked) != layer.locked:
             layer.locked = bool(locked)
-        if lock_alpha is not None:
+            refresh = True
+        if lock_alpha is not None and bool(lock_alpha) != layer.lock_alpha:
             layer.lock_alpha = bool(lock_alpha)
-        if mask_enabled is not None:
+            refresh = True
+        if mask_enabled is not None and bool(mask_enabled) != layer.mask_enabled:
             layer.mask_enabled = bool(mask_enabled)
-        self.invalidate_all()
-        self.mark_modified(True)
+            visual = True
+            refresh = True
+        if visual:
+            self.invalidate_all()
+        if refresh:
+            self.layers_changed.emit()
+        if visual or refresh:
+            self.mark_modified(True)
 
     def is_active_locked(self) -> bool:
         layer = self.active_layer()
@@ -368,6 +401,7 @@ class Document(QObject):
             painter.end()
             return
         first = True
+        temp = None
         for layer in visible:
             if layer.adjustment is not None:
                 painter.end()
@@ -381,7 +415,8 @@ class Document(QObject):
             )
             painter.setCompositionMode(mode)
             if layer.mask is not None and layer.mask_enabled and not layer.mask.isNull():
-                temp = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
+                if temp is None or temp.size() != rect.size():
+                    temp = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
                 temp.fill(Qt.transparent)
                 layer_painter = QPainter(temp)
                 layer_painter.drawImage(0, 0, layer.image, rect.x(), rect.y(),
@@ -565,19 +600,28 @@ class Document(QObject):
         if not layers:
             return
         before_images = [layer.image for layer in layers]
+        before_masks = [layer.mask for layer in layers]
         before_size = QSize(self._size)
         after_images = []
+        after_masks = []
         for layer in layers:
             image = layer.image
+            mask = layer.mask
             if flip_h or flip_v:
                 image = image.mirrored(flip_h, flip_v)
+                if mask is not None:
+                    mask = mask.mirrored(flip_h, flip_v)
             if angle:
                 image = image.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+                if mask is not None:
+                    mask = mask.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
             after_images.append(image.convertToFormat(QImage.Format_ARGB32_Premultiplied))
+            after_masks.append(mask)
         after_size = QSize(before_size.height(), before_size.width()) if angle % 180 else QSize(before_size)
         self._size = after_size
-        for layer, image in zip(layers, after_images):
+        for layer, image, mask in zip(layers, after_images, after_masks):
             layer.image = image
+            layer.mask = mask
         self.selection = None
         self.selection_path = None
         self.selection_mask = None
@@ -585,7 +629,8 @@ class Document(QObject):
         self.floating = None
         self._reset_cache()
         self.history.push(ImageTransformCommand(label, layers, before_images, after_images,
-                                                before_size, after_size))
+                                                before_size, after_size,
+                                                before_masks, after_masks))
         self.invalidate_all()
         self.size_changed.emit()
         self.selection_changed.emit()
@@ -598,12 +643,16 @@ class Document(QObject):
             return
         layers = list(self.layers)
         before_images = [layer.image for layer in layers]
+        before_masks = [layer.mask for layer in layers]
         before_size = QSize(self._size)
         after_images = [layer.image.copy(rect) for layer in layers]
+        after_masks = [layer.mask.copy(rect) if layer.mask is not None else None
+                       for layer in layers]
         after_size = QSize(rect.width(), rect.height())
         self._size = after_size
-        for layer, image in zip(layers, after_images):
+        for layer, image, mask in zip(layers, after_images, after_masks):
             layer.image = image
+            layer.mask = mask
         self.selection = None
         self.selection_path = None
         self.selection_mask = None
@@ -611,7 +660,8 @@ class Document(QObject):
         self.floating = None
         self._reset_cache()
         self.history.push(ImageTransformCommand("Recadrage", layers, before_images, after_images,
-                                                before_size, after_size))
+                                                before_size, after_size,
+                                                before_masks, after_masks))
         self.invalidate_all()
         self.size_changed.emit()
         self.selection_changed.emit()
@@ -636,8 +686,10 @@ class Document(QObject):
             offset_y = (height - old_height) // 2
         layers = list(self.layers)
         before_images = [layer.image for layer in layers]
+        before_masks = [layer.mask for layer in layers]
         before_size = QSize(self._size)
         after_images = []
+        after_masks = []
         for layer in layers:
             image = QImage(width, height, QImage.Format_ARGB32_Premultiplied)
             image.fill(Qt.transparent)
@@ -645,10 +697,20 @@ class Document(QObject):
             painter.drawImage(offset_x, offset_y, layer.image)
             painter.end()
             after_images.append(image)
+            if layer.mask is not None:
+                mask = QImage(width, height, QImage.Format_ARGB32)
+                mask.fill(Qt.transparent)
+                mask_painter = QPainter(mask)
+                mask_painter.drawImage(offset_x, offset_y, layer.mask)
+                mask_painter.end()
+                after_masks.append(mask)
+            else:
+                after_masks.append(None)
         after_size = QSize(width, height)
         self._size = after_size
-        for layer, image in zip(layers, after_images):
+        for layer, image, mask in zip(layers, after_images, after_masks):
             layer.image = image
+            layer.mask = mask
         self.selection = None
         self.selection_path = None
         self.selection_mask = None
@@ -656,7 +718,8 @@ class Document(QObject):
         self.floating = None
         self._reset_cache()
         self.history.push(ImageTransformCommand("Taille du canevas", layers, before_images,
-                                                after_images, before_size, after_size))
+                                                after_images, before_size, after_size,
+                                                before_masks, after_masks))
         self.invalidate_all()
         self.size_changed.emit()
         self.selection_changed.emit()
@@ -727,24 +790,48 @@ class Document(QObject):
         tx.commit()
         return True
 
-    def resize_image(self, width: int, height: int, smooth: bool = True) -> None:
+    def resize_image(self, width: int, height: int, smooth: bool = True,
+                     dpi: int | None = None) -> None:
         if width < 1 or height < 1:
             return
+        if width > 16384 or height > 16384:
+            return
         mode = Qt.SmoothTransformation if smooth else Qt.FastTransformation
+        layers = list(self.layers)
+        before_images = [layer.image for layer in layers]
+        before_masks = [layer.mask for layer in layers]
+        before_size = QSize(self._size)
+        before_dpi = self.dpi
+        after_images = []
+        after_masks = []
+        for layer in layers:
+            image = layer.image.scaled(width, height, Qt.IgnoreAspectRatio, mode)
+            after_images.append(image.convertToFormat(QImage.Format_ARGB32_Premultiplied))
+            if layer.mask is not None:
+                after_masks.append(layer.mask.scaled(
+                    width, height, Qt.IgnoreAspectRatio, mode))
+            else:
+                after_masks.append(None)
         self._size = QSize(width, height)
-        for layer in self.layers:
-            layer.image = layer.image.scaled(width, height, Qt.IgnoreAspectRatio, mode)
-            layer.image = layer.image.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+        if dpi is not None:
+            self.dpi = max(36, min(1200, int(dpi)))
+        for layer, image, mask in zip(layers, after_images, after_masks):
+            layer.image = image
+            layer.mask = mask
         self._reset_cache()
         self.selection = None
         self.selection_path = None
         self.selection_mask = None
         self.selection_tint = None
         self.floating = None
-        self.history.clear()
+        self.history.push(ImageTransformCommand(
+            "Redimensionnement", layers, before_images, after_images,
+            before_size, QSize(width, height), before_masks, after_masks,
+            before_dpi, self.dpi))
         self.invalidate_all()
         self.size_changed.emit()
         self.selection_changed.emit()
+        self.layers_changed.emit()
         self.mark_modified(True)
 
     def mask_region_for_fill(self):

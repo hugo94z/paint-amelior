@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QPainter
 
-from ..brush import StrokeBuffer, stamps_along
+from ..brush import acquire_buffer, stamps_along
 from .base import BaseTool
 
 
@@ -38,7 +38,7 @@ class BrushTool(BaseTool):
             return
         self._layer = layer
         self._tx = self.doc.history.begin("Gomme" if self.erase else "Pinceau")
-        self._buffer = StrokeBuffer(self.doc.size)
+        self._buffer = acquire_buffer(self.doc.size)
         if (self._anchor is not None and event is not None
                 and event.modifiers() & Qt.ShiftModifier):
             self._last = self._anchor
@@ -62,10 +62,7 @@ class BrushTool(BaseTool):
         stamp = self.app.stamp_cache.get(effective, self.hardness, self._color())
         spacing = max(0.75, effective * 0.12)
         points = [pos] if self._last is None else list(stamps_along(self._last, pos, spacing))
-        rect = QRect()
-        for point in points:
-            r = self._buffer.stamp(stamp, point)
-            rect = r if rect.isNull() else rect.united(r)
+        rect = self._buffer.stamp_many(stamp, points)
         self._last = pos
         self._anchor = pos
         if not rect.isNull():

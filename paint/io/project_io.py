@@ -21,6 +21,7 @@ def save_project(doc: Document, path: str | Path, set_path: bool = True) -> bool
         "app": "paint-amelior",
         "width": doc.size.width(),
         "height": doc.size.height(),
+        "dpi": doc.dpi,
         "active": doc.active_index,
         "layers": [
             {
@@ -66,7 +67,8 @@ def load_project(path: str | Path, undo_budget: int = 400 * 1024 * 1024) -> Docu
             data = json.loads(archive.read("project.json").decode("utf-8"))
             width = int(data.get("width", 1))
             height = int(data.get("height", 1))
-            doc = Document(QSize(width, height), undo_budget=undo_budget)
+            doc = Document(QSize(width, height), undo_budget=undo_budget,
+                           dpi=max(36, min(1200, int(data.get("dpi", 96)))))
             for entry in data.get("layers", []):
                 image = png_bytes_to_image(archive.read(entry["file"]))
                 if image is None:

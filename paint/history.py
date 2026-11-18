@@ -111,9 +111,17 @@ class History(QObject):
     def begin(self, label: str) -> Transaction:
         return Transaction(self, label)
 
+    @staticmethod
+    def _size(command) -> int:
+        value = getattr(command, "_cached_nbytes", None)
+        if value is None:
+            value = command.nbytes()
+            command._cached_nbytes = value
+        return value
+
     def push(self, command) -> None:
         self._undo.append(command)
-        self._bytes += command.nbytes()
+        self._bytes += self._size(command)
         self._redo.clear()
         self._trim()
         self.changed.emit()
@@ -122,7 +130,7 @@ class History(QObject):
     def _trim(self) -> None:
         while self._bytes > self.budget_bytes and len(self._undo) > 1:
             dropped = self._undo.pop(0)
-            self._bytes -= dropped.nbytes()
+            self._bytes -= self._size(dropped)
 
     @property
     def can_undo(self) -> bool:
@@ -150,7 +158,7 @@ class History(QObject):
         command = self._undo.pop()
         command.restore(self.doc, True)
         self._redo.append(command)
-        self._bytes -= command.nbytes()
+        self._bytes -= self._size(command)
         self.changed.emit()
         self.doc.mark_modified(True)
         return True
@@ -161,7 +169,7 @@ class History(QObject):
         command = self._redo.pop()
         command.restore(self.doc, False)
         self._undo.append(command)
-        self._bytes += command.nbytes()
+        self._bytes += self._size(command)
         self.changed.emit()
         self.doc.mark_modified(True)
         return True

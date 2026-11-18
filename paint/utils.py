@@ -17,18 +17,27 @@ def painting(target):
 
 
 def image_to_array(image: QImage) -> tuple[QImage, np.ndarray]:
-    conv = image.convertToFormat(QImage.Format_ARGB32)
+    conv, arr = image_array_view(image)
+    return conv, arr.copy()
+
+
+def image_array_view(image: QImage) -> tuple[QImage, np.ndarray]:
+    conv = image if image.format() == QImage.Format_ARGB32 else image.convertToFormat(
+        QImage.Format_ARGB32)
     width, height = conv.width(), conv.height()
-    raw = np.frombuffer(conv.constBits(), np.uint8)
+    raw = np.frombuffer(conv.bits(), np.uint8)
     stride = conv.bytesPerLine()
-    arr = raw.reshape(height, stride)[:, : width * 4].reshape(height, width, 4).copy()
+    if stride == width * 4:
+        arr = raw.reshape(height, width, 4)
+    else:
+        arr = raw.reshape(height, stride)[:, : width * 4].reshape(height, width, 4).copy()
     return conv, arr
 
 
 def array_to_image(arr: np.ndarray, premultiplied: bool = True) -> QImage:
     height, width, _ = arr.shape
-    data = np.ascontiguousarray(arr, dtype=np.uint8).tobytes()
-    img = QImage(data, width, height, width * 4, QImage.Format_ARGB32)
+    data = np.ascontiguousarray(arr, dtype=np.uint8)
+    img = QImage(data.data, width, height, width * 4, QImage.Format_ARGB32)
     img = img.copy()
     if premultiplied:
         img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
@@ -42,13 +51,20 @@ def color_bgra(color: QColor) -> tuple[int, int, int, int]:
 def region_mask(region: QRegion | None, width: int, height: int) -> np.ndarray | None:
     if region is None or region.isEmpty():
         return None
+    if region.rectCount() == 1:
+        rect = region.boundingRect().intersected(QRect(0, 0, width, height))
+        if rect.isEmpty():
+            return None
+        mask = np.zeros((height, width), bool)
+        mask[rect.top(): rect.bottom() + 1, rect.left(): rect.right() + 1] = True
+        return mask
     image = QImage(width, height, QImage.Format_ARGB32)
     image.fill(0)
     painter = QPainter(image)
     painter.setClipRegion(region)
     painter.fillRect(QRect(0, 0, width, height), QColor(255, 255, 255))
     painter.end()
-    _, arr = image_to_array(image)
+    _, arr = image_array_view(image)
     return arr[:, :, 3] > 0
 
 

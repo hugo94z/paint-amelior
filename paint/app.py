@@ -57,6 +57,7 @@ from .ui.docks import AnimationDock, ColorDock, HistoryDock, LayersDock
 from .ui.filter_dialog import FilterDialog
 from .ui.icons import tool_icon
 from .ui.options_bar import OptionsBar
+from .ui.sheet_dialog import CanvasSizeDialog, NewSheetDialog, ResizeImageDialog, load_last_sheet
 from .ui.theme import apply_theme
 
 IMAGE_OPEN_FILTER = (
@@ -83,146 +84,6 @@ Ctrl+molette zoom • molette défilement • Espace+glisser déplacement<br>
 Ctrl+0 ajuster • Ctrl+1 taille réelle • F11 plein écran<br><br>
 <b>Calques</b><br>
 Ctrl+Maj+N nouveau calque • Ctrl+J dupliquer • Ctrl+Maj+E fusionner vers le bas"""
-
-
-class NewDocumentDialog(QDialog):
-    def __init__(self, parent, width: int = 1600, height: int = 1000):
-        super().__init__(parent)
-        self.setWindowTitle("Nouveau document")
-        self.setMinimumWidth(360)
-        self.preset = QComboBox()
-        self.preset.addItem("Personnalisé", None)
-        for label, size in (
-            ("1600 × 1000", (1600, 1000)),
-            ("1920 × 1080", (1920, 1080)),
-            ("2048 × 2048", (2048, 2048)),
-            ("3840 × 2160 (4K)", (3840, 2160)),
-            ("A4 300 dpi", (2480, 3508)),
-            ("A3 300 dpi", (3508, 4961)),
-        ):
-            self.preset.addItem(label, size)
-        self.width_box = QSpinBox()
-        self.width_box.setRange(1, 16384)
-        self.width_box.setValue(width)
-        self.width_box.setSuffix(" px")
-        self.height_box = QSpinBox()
-        self.height_box.setRange(1, 16384)
-        self.height_box.setValue(height)
-        self.height_box.setSuffix(" px")
-        self.background = QComboBox()
-        self.background.addItem("Blanc", "white")
-        self.background.addItem("Transparent", "transparent")
-        self.preset.currentIndexChanged.connect(self._preset_changed)
-        form = QFormLayout()
-        form.addRow("Format", self.preset)
-        form.addRow("Largeur", self.width_box)
-        form.addRow("Hauteur", self.height_box)
-        form.addRow("Fond", self.background)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
-
-    def _preset_changed(self, index: int) -> None:
-        size = self.preset.itemData(index)
-        if size:
-            self.width_box.setValue(size[0])
-            self.height_box.setValue(size[1])
-
-    def document_size(self) -> tuple[int, int]:
-        return self.width_box.value(), self.height_box.value()
-
-    def background_color(self) -> QColor | None:
-        return QColor("#ffffff") if self.background.currentData() == "white" else None
-
-
-class ResizeDialog(QDialog):
-    def __init__(self, parent, width: int, height: int):
-        super().__init__(parent)
-        self.setWindowTitle("Redimensionner l'image")
-        self.setMinimumWidth(320)
-        self._ratio = width / max(1, height)
-        self._guard = False
-        self.width_box = QSpinBox()
-        self.width_box.setRange(1, 16384)
-        self.width_box.setValue(width)
-        self.width_box.setSuffix(" px")
-        self.height_box = QSpinBox()
-        self.height_box.setRange(1, 16384)
-        self.height_box.setValue(height)
-        self.height_box.setSuffix(" px")
-        self.keep_ratio = QCheckBox("Conserver les proportions")
-        self.keep_ratio.setChecked(True)
-        self.smooth = QCheckBox("Lissage (haute qualité)")
-        self.smooth.setChecked(True)
-        self.width_box.valueChanged.connect(self._width_changed)
-        self.height_box.valueChanged.connect(self._height_changed)
-        form = QFormLayout()
-        form.addRow("Largeur", self.width_box)
-        form.addRow("Hauteur", self.height_box)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(self.keep_ratio)
-        layout.addWidget(self.smooth)
-        layout.addWidget(buttons)
-
-    def _width_changed(self, value: int) -> None:
-        if self._guard or not self.keep_ratio.isChecked():
-            return
-        self._guard = True
-        self.height_box.setValue(max(1, round(value / self._ratio)))
-        self._guard = False
-
-    def _height_changed(self, value: int) -> None:
-        if self._guard or not self.keep_ratio.isChecked():
-            return
-        self._guard = True
-        self.width_box.setValue(max(1, round(value * self._ratio)))
-        self._guard = False
-
-    def result_values(self) -> tuple[int, int, bool]:
-        return self.width_box.value(), self.height_box.value(), self.smooth.isChecked()
-
-
-class CanvasSizeDialog(QDialog):
-    def __init__(self, parent, width: int, height: int):
-        super().__init__(parent)
-        self.setWindowTitle("Taille du canevas")
-        self.setMinimumWidth(320)
-        self.width_box = QSpinBox()
-        self.width_box.setRange(1, 16384)
-        self.width_box.setValue(width)
-        self.width_box.setSuffix(" px")
-        self.height_box = QSpinBox()
-        self.height_box.setRange(1, 16384)
-        self.height_box.setValue(height)
-        self.height_box.setSuffix(" px")
-        self.anchor = QComboBox()
-        for key, label in (
-            ("top-left", "Haut gauche"), ("top", "Haut"), ("top-right", "Haut droite"),
-            ("left", "Gauche"), ("center", "Centre"), ("right", "Droite"),
-            ("bottom-left", "Bas gauche"), ("bottom", "Bas"), ("bottom-right", "Bas droite"),
-        ):
-            self.anchor.addItem(label, key)
-        self.anchor.setCurrentIndex(4)
-        form = QFormLayout()
-        form.addRow("Largeur", self.width_box)
-        form.addRow("Hauteur", self.height_box)
-        form.addRow("Ancrage", self.anchor)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(buttons)
-
-    def values(self) -> tuple[int, int, str]:
-        return self.width_box.value(), self.height_box.value(), self.anchor.currentData()
 
 
 class TransformSelectionDialog(QDialog):
@@ -314,7 +175,8 @@ class MainWindow(QMainWindow):
         QThreadPool.globalInstance().setMaxThreadCount(max(1, settings.threads))
         self.resize(1480, 940)
         self.setWindowIcon(tool_icon("brush", size=64))
-        self._create_document(1600, 1000, QColor("#ffffff"))
+        start_width, start_height, start_dpi = load_last_sheet(self.qsettings)
+        self._create_document(start_width, start_height, QColor("#ffffff"), start_dpi)
         self._restore_session()
         tool_id = str(self.qsettings.value("tool/last", "brush"))
         self.set_tool(tool_id if tool_id in self.tools else "brush")
@@ -649,7 +511,8 @@ class MainWindow(QMainWindow):
         self._sync_history()
         self._on_layers_changed()
         self._update_title()
-        self.status_size.setText(f"{doc.size.width()} × {doc.size.height()} px")
+        self.status_size.setText(
+            f"{doc.size.width()} × {doc.size.height()} px • {doc.dpi} dpi")
         self.update_zoom_label()
         self.doc_changed.emit()
 
@@ -659,7 +522,8 @@ class MainWindow(QMainWindow):
 
     def _on_size_changed(self) -> None:
         if self.doc is not None:
-            self.status_size.setText(f"{self.doc.size.width()} × {self.doc.size.height()} px")
+            self.status_size.setText(
+                f"{self.doc.size.width()} × {self.doc.size.height()} px • {self.doc.dpi} dpi")
             self.canvas.fit()
 
     def _sync_history(self) -> None:
@@ -783,27 +647,31 @@ class MainWindow(QMainWindow):
         self._active_index = -1
         self.doc = None
         if not self.tabs:
-            self._create_document(1600, 1000, QColor("#ffffff"))
+            start_width, start_height, start_dpi = load_last_sheet(self.qsettings)
+            self._create_document(start_width, start_height, QColor("#ffffff"), start_dpi)
             return
         self._activate_tab(min(index, len(self.tabs) - 1))
         self._tabs_visibility()
 
-    def _create_document(self, width: int, height: int, background: QColor | None) -> None:
+    def _create_document(self, width: int, height: int, background: QColor | None,
+                         dpi: int = 96) -> None:
         doc = Document.new(width, height, background,
-                           undo_budget=self.settings.undo_budget_bytes)
+                           undo_budget=self.settings.undo_budget_bytes, dpi=dpi)
         doc.invalidate_all()
         self._add_tab(doc, fit=True)
-        self.notify(f"Document {width} × {height} créé")
+        self.notify(f"Document {width} × {height} px à {dpi} dpi créé")
 
     def close_current_tab(self) -> None:
         if self.tabs:
             self._close_tab(self._active_index)
 
     def new_document_dialog(self) -> None:
-        dialog = NewDocumentDialog(self)
+        width, height, dpi = load_last_sheet(self.qsettings)
+        dialog = NewSheetDialog(self, self.qsettings, width, height, dpi)
         if dialog.exec() == QDialog.Accepted:
             width, height = dialog.document_size()
-            self._create_document(width, height, dialog.background_color())
+            self._create_document(width, height, dialog.background_color(),
+                                  dialog.dpi_value())
 
     def open_document(self) -> None:
         start = str(self.doc.path.parent) if self.doc and self.doc.path else ""
@@ -827,8 +695,10 @@ class MainWindow(QMainWindow):
         if image is None:
             QMessageBox.warning(self, APP_NAME, "Format d'image non pris en charge.")
             return
+        dpm = image.dotsPerMeterX()
+        dpi = max(36, min(1200, int(round(dpm * 0.0254)))) if dpm > 0 else 96
         doc = Document(QSize(image.width(), image.height()),
-                       undo_budget=self.settings.undo_budget_bytes)
+                       undo_budget=self.settings.undo_budget_bytes, dpi=dpi)
         layer = Layer(path.stem or "Image", doc.size)
         layer.image = image
         doc.add_layer_raw(layer)
@@ -1182,12 +1052,13 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
         self.commit_floating()
-        dialog = CanvasSizeDialog(self, self.doc.size.width(), self.doc.size.height())
+        dialog = CanvasSizeDialog(self, self.doc.size.width(), self.doc.size.height(),
+                                  self.doc.dpi)
         if dialog.exec() == QDialog.Accepted:
             width, height, anchor = dialog.values()
             self.doc.resize_canvas(width, height, anchor)
             self.canvas.fit()
-            self.notify("Taille du canevas modifiée")
+            self.notify(f"Taille du canevas : {width} × {height} px")
 
     def transform_selection_dialog(self) -> None:
         if self.doc is None or not self.doc.has_selection():
@@ -1384,12 +1255,13 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
         self.commit_floating()
-        dialog = ResizeDialog(self, self.doc.size.width(), self.doc.size.height())
+        dialog = ResizeImageDialog(self, self.doc.size.width(), self.doc.size.height(),
+                                   self.doc.dpi)
         if dialog.exec() == QDialog.Accepted:
-            width, height, smooth = dialog.result_values()
-            self.doc.resize_image(width, height, smooth)
+            width, height, smooth, dpi = dialog.values()
+            self.doc.resize_image(width, height, smooth, dpi)
             self.canvas.fit()
-            self.status_size.setText(f"{width} × {height} px")
+            self._on_size_changed()
             self.notify("Image redimensionnée")
 
     def _apply_filter(self, name: str, label: str, value: float = 0.0) -> None:

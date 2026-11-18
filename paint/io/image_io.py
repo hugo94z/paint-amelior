@@ -58,11 +58,19 @@ def document_to_image(doc: Document, flatten: bool = False) -> QImage:
     return image
 
 
-def export_image(doc: Document, path: str | Path, quality: int = 92) -> bool:
+def export_image(doc: Document, path: str | Path, quality: int = 92,
+                 size: tuple[int, int] | None = None, dpi: int | None = None) -> bool:
     path = Path(path)
     suffix = path.suffix.lower()
     flatten = suffix in {".jpg", ".jpeg", ".bmp"}
     image = document_to_image(doc, flatten=flatten)
+    if size is not None and size[0] > 0 and size[1] > 0:
+        image = image.scaled(int(size[0]), int(size[1]), Qt.IgnoreAspectRatio,
+                             Qt.SmoothTransformation)
+    resolution = int(dpi or doc.dpi or 96)
+    if resolution > 0:
+        image.setDotsPerMeterX(int(round(resolution / 0.0254)))
+        image.setDotsPerMeterY(int(round(resolution / 0.0254)))
     fmt = {
         ".jpg": "JPEG",
         ".jpeg": "JPEG",
