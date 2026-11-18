@@ -7,6 +7,7 @@ from .base import BaseTool
 
 
 class SelectionTool(BaseTool):
+    snaps = True
     id = "select"
     label = "Sélection"
     shortcut = "M"

@@ -7,6 +7,7 @@ from .base import BaseTool
 
 
 class CropTool(BaseTool):
+    snaps = True
     id = "crop"
     label = "Recadrage"
     shortcut = "C"

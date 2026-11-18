@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtGui import QPainter
 
-from ..filters import flood_fill
+from ..filters import flood_fill, pattern_fill
 from .base import BaseTool
 
 
@@ -16,19 +16,32 @@ class FillTool(BaseTool):
         super().__init__(app)
         self.tolerance = 24
         self.contiguous = True
+        self.pattern = ""
+        self.pattern_scale = 100
 
     def press(self, pos, event) -> None:
         layer = self.paintable_layer()
         if layer is None:
             return
-        image, bounds = flood_fill(
-            layer.image,
-            int(pos.x()),
-            int(pos.y()),
-            self.app.fg,
-            self.tolerance,
-            self.doc.selection,
-        )
+        if self.pattern:
+            image, bounds = pattern_fill(
+                layer.image,
+                int(pos.x()),
+                int(pos.y()),
+                self.pattern,
+                self.pattern_scale,
+                self.tolerance,
+                self.doc.selection,
+            )
+        else:
+            image, bounds = flood_fill(
+                layer.image,
+                int(pos.x()),
+                int(pos.y()),
+                self.app.fg,
+                self.tolerance,
+                self.doc.selection,
+            )
         if image is None or bounds.isEmpty():
             self.notify("Aucune zone à remplir")
             return

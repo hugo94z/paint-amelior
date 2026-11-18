@@ -7,6 +7,7 @@ from .base import BaseTool
 
 
 class ShapeTool(BaseTool):
+    snaps = True
     icon = "rect"
 
     def __init__(self, app, kind: str):
@@ -140,6 +141,7 @@ class ShapeTool(BaseTool):
 
 
 class PolygonTool(BaseTool):
+    snaps = True
     id = "polygon"
     label = "Polygone"
     shortcut = "Y"

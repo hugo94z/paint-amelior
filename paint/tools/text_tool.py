@@ -8,6 +8,7 @@ from ..ui.text_dialog import TextDialog
 
 
 class TextTool(BaseTool):
+    snaps = True
     id = "text"
     label = "Texte"
     shortcut = "T"

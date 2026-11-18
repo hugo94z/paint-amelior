@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 from PySide6.QtCore import QPoint, QPointF, QRect, QSize
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QRegion
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QRegion
 
 from paint.brush import StampCache
 from paint.document import Document
@@ -345,3 +345,106 @@ def test_autosave_roundtrip(qapp, tmp_path, monkeypatch):
     assert recovered.path is None
     autosave.clear(slot)
     assert not autosave.entries()
+
+
+def test_sheet_units_and_presets(qapp):
+    from paint.sheet import PRESETS, from_px, to_px
+
+    a4 = next(preset for preset in PRESETS if preset.name == "A4")
+    assert a4.width == 2480 and a4.height == 3508
+    assert abs(to_px(210, "mm", 300) - 2480.31) < 0.5
+    assert abs(to_px(21, "cm", 300) - 2480.31) < 0.5
+    assert abs(to_px(8.27, "in", 300) - 2481.0) < 1.0
+    assert abs(from_px(2480, "mm", 300) - 210.0) < 0.5
+
+
+def test_dpi_and_undoable_resize(qapp):
+    doc = Document.new(100, 80, QColor("white"), dpi=300)
+    layer = doc.active_layer()
+    layer.mask = QImage(layer.image.size(), QImage.Format_ARGB32)
+    layer.mask.fill(QColor(255, 255, 255, 255))
+    doc.resize_image(50, 40, True, 150)
+    assert doc.size == QSize(50, 40)
+    assert doc.dpi == 150
+    assert layer.mask.size() == QSize(50, 40)
+    assert doc.history.can_undo
+    doc.history.undo()
+    assert doc.size == QSize(100, 80)
+    assert doc.dpi == 300
+    assert layer.mask.size() == QSize(100, 80)
+
+
+def test_guides_and_snapping(qapp):
+    doc = Document.new(200, 100, QColor("white"))
+    doc.add_guide("h", 40)
+    doc.add_guide("v", 120)
+    assert doc.snap_point(QPointF(118, 43), 6) == QPointF(120, 40)
+    snapped = doc.snap_point(QPointF(50, 50), 20, grid=32)
+    assert snapped.x() in (32, 64) and snapped.y() == 40
+    doc.resize_canvas(80, 60)
+    assert all(value <= 60 for value in doc.guides_h)
+    assert all(value <= 80 for value in doc.guides_v)
+
+
+def test_layer_styles_and_undo(qapp):
+    from paint.layer import default_styles
+
+    doc = Document.new(80, 80, QColor("white"))
+    layer = doc.active_layer()
+    fill_layer(layer, QRect(20, 20, 40, 40), QColor("#2563eb"))
+    doc.invalidate_all()
+    styles = default_styles()
+    styles["shadow"].update(enabled=True, offset_x=6, offset_y=6, blur=3)
+    styles["stroke"].update(enabled=True, width=3, color="#f97316")
+    doc.set_layer_styles(doc.active_index, styles)
+    assert layer.styles["shadow"]["enabled"]
+    assert doc.composite().pixelColor(63, 63) != QColor("white")
+    doc.history.undo()
+    assert not layer.styles["shadow"]["enabled"]
+
+
+def test_pattern_fill(qapp, tmp_path):
+    from paint.filters import pattern_fill
+
+    pattern = tmp_path / "pattern.png"
+    tile = QImage(8, 8, QImage.Format_ARGB32)
+    tile.fill(QColor("#00ff00"))
+    assert tile.save(str(pattern))
+    doc = Document.new(40, 40, QColor("white"))
+    image = doc.active_layer().image
+    result, bounds = pattern_fill(image, 5, 5, str(pattern), 100, 40, None)
+    assert result is not None
+    assert bounds == QRect(0, 0, 40, 40)
+    assert result.pixelColor(4, 4) == QColor("#00ff00")
+
+
+def test_clone_and_tone_tools(qapp):
+    from paint.tools.clone import CloneTool
+    from paint.tools.tone import ToneTool
+
+    doc = Document.new(160, 120, QColor("white"))
+    doc.active_index = 0
+    layer = doc.active_layer()
+    fill_layer(layer, QRect(60, 0, 20, 120), QColor("#111827"))
+    doc.invalidate_all()
+    app = FakeApp(doc)
+    clone = CloneTool(app)
+    clone.size = 18
+    clone.source = QPointF(65, 30)
+    clone.press(QPointF(20, 90), None)
+    for x in range(20, 140, 6):
+        clone.move(QPointF(x, 90), None)
+    clone.release(QPointF(140, 90), None)
+    assert layer.image.pixelColor(30, 90) != QColor("white")
+
+    doc2 = Document.new(80, 80, QColor("#808080"))
+    doc2.active_index = 0
+    gray = doc2.active_layer()
+    app2 = FakeApp(doc2)
+    tone = ToneTool(app2)
+    tone.size = 30
+    tone.mode = "dodge"
+    tone.press(QPointF(40, 40), None)
+    tone.release(QPointF(40, 40), None)
+    assert gray.image.pixelColor(40, 40).lightness() > 128
+    assert gray.image.pixelColor(2, 2).lightness() == 128

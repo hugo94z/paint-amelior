@@ -23,6 +23,18 @@ BLEND_MODES = [
 _ids = itertools.count(1)
 
 
+def default_styles() -> dict:
+    return {
+        "shadow": {
+            "enabled": False, "color": "#000000", "opacity": 0.6,
+            "offset_x": 4, "offset_y": 4, "blur": 6,
+        },
+        "stroke": {
+            "enabled": False, "color": "#ffffff", "opacity": 1.0, "width": 3,
+        },
+    }
+
+
 class Layer:
     def __init__(self, name: str, size: QSize, color: QColor | None = None):
         self.id = next(_ids)
@@ -35,6 +47,7 @@ class Layer:
         self.locked = False
         self.lock_alpha = False
         self.adjustment: dict | None = None
+        self.styles = default_styles()
         self.image = QImage(size, QImage.Format_ARGB32_Premultiplied)
         self.image.fill(color if color is not None else Qt.transparent)
 
@@ -50,6 +63,9 @@ class Layer:
             "locked": self.locked,
             "lock_alpha": self.lock_alpha,
             "adjustment": dict(self.adjustment) if self.adjustment else None,
+            "styles": {
+                key: dict(value) for key, value in self.styles.items()
+            } if self.styles else default_styles(),
         }
 
     def restore(self, data: dict) -> None:
@@ -62,3 +78,8 @@ class Layer:
         self.locked = data.get("locked", False)
         self.lock_alpha = data.get("lock_alpha", False)
         self.adjustment = dict(data["adjustment"]) if data.get("adjustment") else None
+        styles = data.get("styles")
+        self.styles = {key: dict(value) for key, value in styles.items()} if styles else default_styles()
+
+    def has_styles(self) -> bool:
+        return any(bool(style.get("enabled")) for style in self.styles.values())

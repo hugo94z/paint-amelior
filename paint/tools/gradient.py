@@ -7,6 +7,7 @@ from .base import BaseTool
 
 
 class GradientTool(BaseTool):
+    snaps = True
     id = "gradient"
     label = "Dégradé"
     shortcut = "D"

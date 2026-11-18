@@ -4,12 +4,17 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QPushButton,
     QSlider,
     QSpinBox,
     QWidget,
 )
+
+from ..brushes import BrushPreset, all_presets, load_custom, save_custom
 
 
 class OptionsBar(QWidget):
@@ -118,6 +123,87 @@ class OptionsBar(QWidget):
                     self._check("Pression", tool.pressure_size,
                                 self._pressure_setter(tool))
                 )
+                self.layout_box.addWidget(self._label("Espacement"))
+                self.layout_box.addWidget(
+                    self._spin(2, 200, int(tool.spacing * 100), " %",
+                               self._spacing_setter(tool), 64)
+                )
+            if tool_id == "brush":
+                self._presets = all_presets(self.app.qsettings)
+                preset_box = QComboBox()
+                preset_box.addItem("Personnalisé", None)
+                for preset in self._presets:
+                    preset_box.addItem(preset.name, preset.name)
+                preset_box.setFixedWidth(130)
+                preset_box.activated.connect(
+                    lambda index: self._apply_preset(tool, preset_box, index))
+                self.layout_box.addWidget(self._label("Preset"))
+                self.layout_box.addWidget(preset_box)
+                save_button = QPushButton("Mémoriser")
+                save_button.clicked.connect(lambda: self._save_preset(tool))
+                self.layout_box.addWidget(save_button)
+                tip_button = QPushButton("Embout…")
+                tip_button.clicked.connect(lambda: self._import_tip(tool))
+                self.layout_box.addWidget(tip_button)
+                clear_button = QPushButton("Forme")
+                clear_button.clicked.connect(lambda: self._reset_tip(tool))
+                self.layout_box.addWidget(clear_button)
+                self.layout_box.addWidget(self._label("Dispersion"))
+                self.layout_box.addWidget(
+                    self._spin(0, 200, int(tool.scatter * 100), " %",
+                               self._scatter_setter(tool), 60)
+                )
+        elif tool_id in ("clone", "tone", "smudge"):
+            self.layout_box.addWidget(self._label("Taille"))
+            slider = self._slider(1, 300, tool.size,
+                                  lambda value: self._set_size(tool, value), 110)
+            spin = self._spin(1, 800, tool.size, " px",
+                              lambda value: self._set_size(tool, value), 70)
+            slider.valueChanged.connect(lambda value: spin.setValue(int(value)))
+            spin.valueChanged.connect(lambda value: slider.setValue(min(300, int(value))))
+            self.layout_box.addWidget(slider)
+            self.layout_box.addWidget(spin)
+            if tool_id == "clone":
+                self.layout_box.addWidget(self._label("Opacité"))
+                opacity_slider, opacity_label = self._value_slider(
+                    1, 100, int(tool.opacity * 100), self._opacity_setter(tool), 90
+                )
+                self.layout_box.addWidget(opacity_slider)
+                self.layout_box.addWidget(opacity_label)
+                self.layout_box.addWidget(
+                    self._check("Aligné", tool.aligned,
+                                lambda value: setattr(tool, "aligned", bool(value)))
+                )
+                self.layout_box.addWidget(
+                    self._check("Tous les calques", tool.sample_all,
+                                lambda value: setattr(tool, "sample_all", bool(value)))
+                )
+                hint = QLabel("Alt+clic pour choisir la source")
+                hint.setStyleSheet("color:#7f858f;")
+                self.layout_box.addWidget(hint)
+            else:
+                self.layout_box.addWidget(self._label("Intensité"))
+                strength_slider, strength_label = self._value_slider(
+                    1, 100, int(tool.strength * 100),
+                    self._strength_setter(tool), 90
+                )
+                self.layout_box.addWidget(strength_slider)
+                self.layout_box.addWidget(strength_label)
+                if tool_id == "tone":
+                    self.layout_box.addWidget(self._label("Mode"))
+                    self.layout_box.addWidget(
+                        self._combo([("dodge", "Éclaircir"), ("burn", "Assombrir")],
+                                    tool.mode,
+                                    lambda value: self._set_attr(tool, "mode", value), 120)
+                    )
+                else:
+                    self.layout_box.addWidget(self._label("Dureté"))
+                    hardness_slider, hardness_label = self._value_slider(
+                        0, 100, int(tool.hardness * 100),
+                        self._hardness_setter(tool), 90
+                    )
+                    self.layout_box.addWidget(hardness_slider)
+                    self.layout_box.addWidget(hardness_label)
             if tool_id in ("rect", "ellipse", "roundrect", "polygon"):
                 self.layout_box.addWidget(
                     self._check("Rempli (couleur d'arrière-plan)", tool.filled,
@@ -135,6 +221,17 @@ class OptionsBar(QWidget):
             self.layout_box.addWidget(
                 self._spin(0, 255, tool.tolerance, "", self._tolerance_setter(tool), 56)
             )
+            pattern_button = QPushButton("Motif…")
+            pattern_button.clicked.connect(lambda: self._import_pattern(tool))
+            self.layout_box.addWidget(pattern_button)
+            self.layout_box.addWidget(self._label("Échelle"))
+            self.layout_box.addWidget(
+                self._spin(5, 800, tool.pattern_scale, " %",
+                           lambda value: setattr(tool, "pattern_scale", int(value)), 64)
+            )
+            clear_pattern = QPushButton("Couleur")
+            clear_pattern.clicked.connect(lambda: self._clear_pattern(tool))
+            self.layout_box.addWidget(clear_pattern)
         elif tool_id == "gradient":
             self.layout_box.addWidget(self._label("Type"))
             self.layout_box.addWidget(
@@ -283,6 +380,77 @@ class OptionsBar(QWidget):
             tool.pressure_size = bool(value)
 
         return setter
+
+    def _spacing_setter(self, tool):
+        def setter(value):
+            tool.spacing = max(0.02, int(value) / 100.0)
+
+        return setter
+
+    def _strength_setter(self, tool):
+        def setter(value):
+            tool.strength = max(0.01, int(value) / 100.0)
+
+        return setter
+
+    def _set_size(self, tool, value) -> None:
+        tool.size = int(value)
+        self.app.canvas.update()
+
+    def _scatter_setter(self, tool):
+        def setter(value):
+            tool.scatter = max(0.0, int(value) / 100.0)
+
+        return setter
+
+    def _apply_preset(self, tool, combo, index: int) -> None:
+        if index <= 0 or index - 1 >= len(self._presets):
+            return
+        tool.apply_preset(self._presets[index - 1])
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(0, lambda: self.build(tool))
+
+    def _save_preset(self, tool) -> None:
+        name, ok = QInputDialog.getText(self, "Mémoriser le pinceau", "Nom du preset :")
+        name = name.strip()
+        if not ok or not name:
+            return
+        preset = BrushPreset(name, tool.size, tool.hardness, tool.opacity,
+                             tool.spacing, tool.pressure_size, tool.scatter, tool.tip)
+        custom = [item for item in load_custom(self.app.qsettings)
+                  if item.name.casefold() != name.casefold()]
+        custom.append(preset)
+        save_custom(self.app.qsettings, custom)
+        self.app.notify(f"Preset « {name} » enregistré")
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(0, lambda: self.build(tool))
+
+    def _import_tip(self, tool) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Embout de pinceau", "", "Images (*.png *.webp *.jpg *.bmp)")
+        if path:
+            tool.tip = path
+            tool._tip_cache.clear()
+            self.app.notify("Embout personnalisé chargé")
+            self.app.canvas.update()
+
+    def _reset_tip(self, tool) -> None:
+        tool.tip = ""
+        tool._tip_cache.clear()
+        self.app.canvas.update()
+
+    def _import_pattern(self, tool) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Motif de remplissage", "", "Images (*.png *.webp *.jpg *.bmp)")
+        if path:
+            tool.pattern = path
+            self.app.notify("Motif de remplissage chargé")
+
+    def _clear_pattern(self, tool) -> None:
+        tool.pattern = ""
+        self.app.notify("Remplissage par couleur")
 
     def _set_attr(self, tool, attr, value) -> None:
         setattr(tool, attr, value)

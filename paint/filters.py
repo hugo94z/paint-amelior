@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QImage
 from PIL import Image, ImageEnhance, ImageFilter
-
 from .utils import (
     array_to_image,
     color_bgra,
     image_array_view,
     image_to_array,
     mask_bbox,
+    mask_from_array,
     region_mask,
 )
 
@@ -271,13 +271,47 @@ def _scanline(match, x: int, y: int):
 
 
 def flood_mask(image: QImage, x: int, y: int, tolerance: int, clip=None):
-    _, arr = image_array_view(image)
+    conv, arr = image_array_view(image)
     return _mask_from_array(arr, x, y, int(tolerance), clip)
 
 
 def color_range_mask(image: QImage, color: QColor, tolerance: int):
-    _, arr = image_array_view(image)
+    conv, arr = image_array_view(image)
     return _diff_mask(arr, np.array(color_bgra(color), dtype=np.uint8), int(tolerance))
+
+
+def pattern_fill(image: QImage, x: int, y: int, pattern_path: str, scale: float = 100.0,
+                 tolerance: int = 0, clip_region=None) -> tuple[QImage | None, QRect]:
+    from PySide6.QtGui import QBrush, QPainter
+
+    tile = QImage(str(pattern_path))
+    if tile.isNull():
+        return None, QRect()
+    height, width = image.height(), image.width()
+    clip = region_mask(clip_region, width, height)
+    conv, arr = image_array_view(image)
+    mask = _mask_from_array(arr, x, y, int(tolerance), clip)
+    if mask is None or not mask.any():
+        return None, QRect()
+    bounds = mask_bbox(mask)
+    factor = max(1.0, float(scale)) / 100.0
+    if abs(factor - 1.0) > 0.01:
+        tile = tile.scaled(max(1, int(tile.width() * factor)),
+                           max(1, int(tile.height() * factor)),
+                           Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    canvas = QImage(bounds.size(), QImage.Format_ARGB32_Premultiplied)
+    canvas.fill(Qt.transparent)
+    painter = QPainter(canvas)
+    painter.fillRect(canvas.rect(), QBrush(tile))
+    painter.end()
+    local = mask[bounds.top(): bounds.bottom() + 1, bounds.left(): bounds.right() + 1]
+    alpha = mask_from_array(local)
+    if alpha is not None:
+        painter = QPainter(canvas)
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        painter.drawImage(0, 0, alpha)
+        painter.end()
+    return canvas, bounds
 
 
 def flood_fill(image: QImage, x: int, y: int, color: QColor, tolerance: int = 0,
@@ -286,7 +320,7 @@ def flood_fill(image: QImage, x: int, y: int, color: QColor, tolerance: int = 0,
 
     height, width = image.height(), image.width()
     clip = region_mask(clip_region, width, height)
-    _, arr = image_array_view(image)
+    conv, arr = image_array_view(image)
     mask = _mask_from_array(arr, x, y, int(tolerance), clip)
     if mask is None or not mask.any():
         return None, QRect()

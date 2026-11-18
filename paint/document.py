@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +79,32 @@ class ImageTransformCommand:
         doc.restore_image_state(self.before_size if use_before else self.after_size)
 
 
+class LayerPropsCommand:
+    def __init__(self, label: str, layer, before: dict, after: dict, merge_key: str = ""):
+        self.label = label
+        self.layer = layer
+        self.before = before
+        self.after = after
+        self.merge_key = merge_key
+        self.bounds = None
+        self._stamp = time.monotonic()
+
+    def nbytes(self) -> int:
+        return 0
+
+    def merge(self, after: dict) -> bool:
+        if time.monotonic() - self._stamp > 1.5:
+            return False
+        self.after = after
+        self._stamp = time.monotonic()
+        return True
+
+    def restore(self, doc, use_before: bool) -> None:
+        self.layer.restore(self.before if use_before else self.after)
+        doc.invalidate_all()
+        doc.layers_changed.emit()
+
+
 class Document(QObject):
     dirty = Signal(QRect)
     layers_changed = Signal()
@@ -101,6 +128,9 @@ class Document(QObject):
         self.floating: QImage | None = None
         self.floating_pos = QPoint(0, 0)
         self.frames: list[dict] = []
+        self.guides_h: list[float] = []
+        self.guides_v: list[float] = []
+        self.guides_visible = True
         self.preview_image: QImage | None = None
         self.path: Path | None = None
         self._modified = False
@@ -270,38 +300,67 @@ class Document(QObject):
         if not 0 <= index < len(self.layers):
             return
         layer = self.layers[index]
+        before = layer.snapshot()
         visual = False
         refresh = False
+        changed: list[str] = []
         if opacity is not None:
             value = max(0.0, min(1.0, opacity))
             if value != layer.opacity:
                 layer.opacity = value
                 visual = True
+                changed.append("opacity")
         if blend is not None and blend in BLEND and blend != layer.blend:
             layer.blend = blend
             visual = True
+            changed.append("blend")
         if visible is not None and bool(visible) != layer.visible:
             layer.visible = bool(visible)
             visual = True
+            changed.append("visible")
         if name is not None and name and name != layer.name:
             layer.name = name
             refresh = True
+            changed.append("name")
         if locked is not None and bool(locked) != layer.locked:
             layer.locked = bool(locked)
             refresh = True
+            changed.append("locked")
         if lock_alpha is not None and bool(lock_alpha) != layer.lock_alpha:
             layer.lock_alpha = bool(lock_alpha)
             refresh = True
+            changed.append("lock_alpha")
         if mask_enabled is not None and bool(mask_enabled) != layer.mask_enabled:
             layer.mask_enabled = bool(mask_enabled)
             visual = True
             refresh = True
+            changed.append("mask_enabled")
         if visual:
             self.invalidate_all()
         if refresh:
             self.layers_changed.emit()
-        if visual or refresh:
-            self.mark_modified(True)
+        if not changed:
+            return
+        labels = {
+            "opacity": "Opacité du calque", "blend": "Mode de fusion",
+            "visible": "Visibilité du calque", "name": "Renommage du calque",
+            "locked": "Verrouillage du calque", "lock_alpha": "Verrouillage alpha",
+            "mask_enabled": "Masque du calque",
+        }
+        self._push_props(layer, before, layer.snapshot(),
+                         labels.get(changed[0], "Propriétés du calque"),
+                         ",".join(changed))
+        self.mark_modified(True)
+
+    def _push_props(self, layer, before: dict, after: dict, label: str,
+                    merge_key: str) -> None:
+        last = self.history._undo[-1] if self.history._undo else None
+        if (isinstance(last, LayerPropsCommand) and last.layer is layer
+                and last.merge_key == merge_key and not self.history._redo
+                and last.merge(after)):
+            self.history.changed.emit()
+            return
+        self.history.push(LayerPropsCommand(label, layer, before, after, merge_key))
 
     def is_active_locked(self) -> bool:
         layer = self.active_layer()
@@ -396,7 +455,7 @@ class Document(QObject):
         ]
         if (len(visible) == 1 and visible[0].blend == "normal"
                 and visible[0].opacity >= 0.999 and visible[0].mask is None
-                and visible[0].adjustment is None):
+                and visible[0].adjustment is None and not visible[0].has_styles()):
             painter.drawImage(rect, visible[0].image, rect)
             painter.end()
             return
@@ -414,22 +473,105 @@ class Document(QObject):
                 layer.blend, QPainter.CompositionMode_SourceOver
             )
             painter.setCompositionMode(mode)
-            if layer.mask is not None and layer.mask_enabled and not layer.mask.isNull():
+            styled = self._styled_image(layer, rect) if layer.has_styles() else None
+            if (layer.mask is not None and layer.mask_enabled and not layer.mask.isNull()) or styled:
                 if temp is None or temp.size() != rect.size():
                     temp = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
                 temp.fill(Qt.transparent)
                 layer_painter = QPainter(temp)
-                layer_painter.drawImage(0, 0, layer.image, rect.x(), rect.y(),
-                                        rect.width(), rect.height())
-                layer_painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-                layer_painter.drawImage(0, 0, layer.mask, rect.x(), rect.y(),
-                                        rect.width(), rect.height())
+                if styled is not None:
+                    layer_painter.drawImage(0, 0, styled)
+                else:
+                    layer_painter.drawImage(0, 0, layer.image, rect.x(), rect.y(),
+                                            rect.width(), rect.height())
+                if layer.mask is not None and layer.mask_enabled and not layer.mask.isNull():
+                    layer_painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+                    layer_painter.drawImage(0, 0, layer.mask, rect.x(), rect.y(),
+                                            rect.width(), rect.height())
                 layer_painter.end()
                 painter.drawImage(rect.topLeft(), temp)
             else:
                 painter.drawImage(rect, layer.image, rect)
             first = False
         painter.end()
+
+    def _styled_image(self, layer, rect: QRect) -> QImage:
+        shadow = layer.styles.get("shadow", {})
+        stroke = layer.styles.get("stroke", {})
+        margin = 0
+        if shadow.get("enabled"):
+            margin = max(margin, int(abs(shadow.get("offset_x", 0))) + int(shadow.get("blur", 0)),
+                         int(abs(shadow.get("offset_y", 0))) + int(shadow.get("blur", 0)))
+        if stroke.get("enabled"):
+            margin = max(margin, int(stroke.get("width", 0)))
+        margin = max(0, margin)
+        big = rect.adjusted(-margin, -margin, margin, margin).intersected(self.rect())
+        if big.isEmpty():
+            return QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
+        out = QImage(big.size(), QImage.Format_ARGB32_Premultiplied)
+        out.fill(Qt.transparent)
+        painter = QPainter(out)
+        if shadow.get("enabled"):
+            color = QColor(shadow.get("color", "#000000"))
+            color.setAlphaF(max(0.0, min(1.0, float(shadow.get("opacity", 0.6)))))
+            silhouette = self._silhouette(layer, big, color)
+            offset_x = int(shadow.get("offset_x", 0))
+            offset_y = int(shadow.get("offset_y", 0))
+            blur = max(0, int(shadow.get("blur", 0)))
+            positions = [(0, 0)]
+            if blur > 0:
+                import math
+
+                for radius in (blur / 2.0, float(blur)):
+                    for step in range(8):
+                        angle = math.radians(step * 45)
+                        positions.append((int(math.cos(angle) * radius),
+                                          int(math.sin(angle) * radius)))
+            painter.setOpacity(1.0 / len(positions))
+            for dx, dy in positions:
+                painter.drawImage(offset_x + dx - big.left(), offset_y + dy - big.top(),
+                                  silhouette)
+            painter.setOpacity(1.0)
+        if stroke.get("enabled"):
+            import math
+
+            color = QColor(stroke.get("color", "#ffffff"))
+            color.setAlphaF(max(0.0, min(1.0, float(stroke.get("opacity", 1.0)))))
+            silhouette = self._silhouette(layer, big, color)
+            width = max(1, int(stroke.get("width", 3)))
+            for step in range(8):
+                angle = math.radians(step * 45)
+                dx = int(math.cos(angle) * width)
+                dy = int(math.sin(angle) * width)
+                painter.drawImage(dx, dy, silhouette)
+        painter.drawImage(0, 0, layer.image, big.x(), big.y(), big.width(), big.height())
+        painter.end()
+        result = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
+        result.fill(Qt.transparent)
+        painter = QPainter(result)
+        painter.drawImage(big.left() - rect.left(), big.top() - rect.top(), out)
+        painter.end()
+        return result
+
+    def _silhouette(self, layer, rect: QRect, color: QColor) -> QImage:
+        image = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        painter.drawImage(0, 0, layer.image, rect.x(), rect.y(), rect.width(), rect.height())
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(image.rect(), color)
+        painter.end()
+        return image
+
+    def set_layer_styles(self, index: int, styles: dict) -> None:
+        if not 0 <= index < len(self.layers):
+            return
+        layer = self.layers[index]
+        before = layer.snapshot()
+        layer.styles = {key: dict(value) for key, value in styles.items()}
+        self.invalidate_all()
+        self._push_props(layer, before, layer.snapshot(), "Styles du calque", "styles")
+        self.mark_modified(True)
 
     def _apply_adjustment(self, layer, rect: QRect) -> None:
         from .filters import apply
@@ -571,12 +713,71 @@ class Document(QObject):
             self._modified = value
             self.modified_changed.emit(value)
 
+    def add_guide(self, orientation: str, value: float) -> None:
+        if orientation == "h":
+            self.guides_h.append(float(value))
+        else:
+            self.guides_v.append(float(value))
+        self.mark_modified(True)
+
+    def remove_guide(self, orientation: str, value: float, tolerance: float) -> bool:
+        guides = self.guides_h if orientation == "h" else self.guides_v
+        for index, existing in enumerate(guides):
+            if abs(existing - value) <= tolerance:
+                del guides[index]
+                self.mark_modified(True)
+                return True
+        return False
+
+    def clear_guides(self) -> None:
+        if self.guides_h or self.guides_v:
+            self.guides_h.clear()
+            self.guides_v.clear()
+            self.mark_modified(True)
+
+    def snap_point(self, point: QPointF, tolerance: float = 6.0, grid: float = 0.0,
+                   edges: bool = True) -> QPointF:
+        x = float(point.x())
+        y = float(point.y())
+        best_x = x
+        best_y = y
+        margin_x = tolerance
+        margin_y = tolerance
+        candidates_x = list(self.guides_v)
+        candidates_y = list(self.guides_h)
+        if edges:
+            candidates_x.extend((0.0, float(self._size.width())))
+            candidates_y.extend((0.0, float(self._size.height())))
+        for value in candidates_x:
+            distance = abs(value - x)
+            if distance <= margin_x:
+                best_x = value
+                margin_x = distance
+        for value in candidates_y:
+            distance = abs(value - y)
+            if distance <= margin_y:
+                best_y = value
+                margin_y = distance
+        if grid > 0:
+            nearest_x = round(x / grid) * grid
+            if abs(nearest_x - x) <= margin_x:
+                best_x = nearest_x
+                margin_x = abs(nearest_x - x)
+            nearest_y = round(y / grid) * grid
+            if abs(nearest_y - y) <= margin_y:
+                best_y = nearest_y
+        return QPointF(best_x, best_y)
+
     def is_modified(self) -> bool:
         return self._modified
 
     def _reset_cache(self) -> None:
         self._cache = QImage(self._size, QImage.Format_ARGB32_Premultiplied)
         self._cache.fill(Qt.transparent)
+        self.guides_h = [value for value in self.guides_h
+                         if 0.0 <= value <= float(self._size.height())]
+        self.guides_v = [value for value in self.guides_v
+                         if 0.0 <= value <= float(self._size.width())]
 
     def restore_image_state(self, size: QSize) -> None:
         self._size = QSize(size)

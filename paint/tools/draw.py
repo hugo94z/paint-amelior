@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRect, Qt
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QImage, QPainter
 
-from ..brush import acquire_buffer, stamps_along
+from ..brush import StrokeBuffer, acquire_buffer, stamps_along
 from .base import BaseTool
 
 
@@ -20,11 +20,50 @@ class BrushTool(BaseTool):
         self.opacity = 1.0
         self.hardness = 0.85
         self.pressure_size = True
+        self.spacing = 0.12
+        self.scatter = 0.0
+        self.tip = ""
+        self._tip_cache: dict = {}
         self._layer = None
         self._tx = None
         self._buffer: StrokeBuffer | None = None
         self._last: QPointF | None = None
         self._anchor: QPointF | None = None
+
+    def apply_preset(self, preset) -> None:
+        self.size = preset.size
+        self.hardness = preset.hardness
+        self.opacity = preset.opacity
+        self.spacing = preset.spacing
+        self.pressure_size = preset.pressure
+        self.scatter = preset.scatter
+        self.tip = preset.tip
+        self._tip_cache.clear()
+        self.app.canvas.update()
+
+    def _stamp(self, size: int):
+        if self.tip:
+            key = (self.tip, int(size), self.app.fg.rgba())
+            stamp = self._tip_cache.get(key)
+            if stamp is not None:
+                return stamp
+            source = QImage(self.tip)
+            if not source.isNull():
+                scaled = source.scaled(size, size, Qt.KeepAspectRatio,
+                                       Qt.SmoothTransformation)
+                stamp = QImage(size, size, QImage.Format_ARGB32_Premultiplied)
+                stamp.fill(Qt.transparent)
+                painter = QPainter(stamp)
+                painter.drawImage((size - scaled.width()) // 2,
+                                  (size - scaled.height()) // 2, scaled)
+                painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+                painter.fillRect(stamp.rect(), self._color())
+                painter.end()
+                if len(self._tip_cache) > 24:
+                    self._tip_cache.clear()
+                self._tip_cache[key] = stamp
+                return stamp
+        return self.app.stamp_cache.get(size, self.hardness, self._color())
 
     def cursor_size(self) -> int:
         return self.size
@@ -59,9 +98,16 @@ class BrushTool(BaseTool):
         if self.pressure_size:
             pressure = max(0.05, min(1.0, getattr(self.app, "pressure", 1.0)))
         effective = max(1, int(round(self.size * (0.3 + 0.7 * pressure))))
-        stamp = self.app.stamp_cache.get(effective, self.hardness, self._color())
-        spacing = max(0.75, effective * 0.12)
+        stamp = self._stamp(effective)
+        spacing = max(0.75, effective * self.spacing)
         points = [pos] if self._last is None else list(stamps_along(self._last, pos, spacing))
+        if self.scatter > 0 and points:
+            import random
+
+            spread = effective * self.scatter
+            points = [QPointF(point.x() + random.uniform(-spread, spread),
+                              point.y() + random.uniform(-spread, spread))
+                      for point in points]
         rect = self._buffer.stamp_many(stamp, points)
         self._last = pos
         self._anchor = pos

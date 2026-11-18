@@ -46,18 +46,23 @@ from .document import Document
 from .filters import apply_to_document
 from .io.image_io import EXPORT_FILTER, export_image, load_image
 from .io.exporters import export_pdf, export_svg
+from .io.printing import print_document
 from .io.project_io import load_project, save_project
+from .io.psd_io import load_psd_document
 from .layer import Layer
 from .plugins import load_plugins
 from .tools import build_tools
 from .tools.base import BaseTool
 from .ui.canvas import Canvas, CanvasHost
 from .ui.command_palette import CommandPalette
-from .ui.docks import AnimationDock, ColorDock, HistoryDock, LayersDock
+from .ui.docks import AnimationDock, ColorDock, HistoryDock, LayersDock, NavigatorDock
+from .ui.export_dialog import ExportImageDialog
 from .ui.filter_dialog import FilterDialog
 from .ui.icons import tool_icon
 from .ui.options_bar import OptionsBar
+from .ui.preferences import PreferencesDialog
 from .ui.sheet_dialog import CanvasSizeDialog, NewSheetDialog, ResizeImageDialog, load_last_sheet
+from .ui.style_dialog import LayerStyleDialog
 from .ui.theme import apply_theme
 
 IMAGE_OPEN_FILTER = (
@@ -132,6 +137,8 @@ class MainWindow(QMainWindow):
         self.pressure = 1.0
         self.show_grid = False
         self.grid_size = 64
+        self.snap_enabled = True
+        self.snap_grid = False
         self.light_theme = False
         self.qsettings = QSettings("PaintAmeliore", "PaintAmeliore")
         self.recent_files = self._load_recent()
@@ -204,11 +211,15 @@ class MainWindow(QMainWindow):
         self.action_save = self._action("Enregistrer", self.save_document, "Ctrl+S")
         self.action_save_as = self._action("Enregistrer sous…", self.save_document_as, "Ctrl+Shift+S")
         self.action_export = self._action("Exporter une image…", self.export_document, "Ctrl+E")
+        self.action_print = self._action("Imprimer…", self.print_current, "Ctrl+P")
+        self.action_print_preview = self._action("Aperçu avant impression…", self.print_preview,
+                                                "Ctrl+Shift+P")
         self.action_export_pdf = self._action("Exporter en PDF…", self.export_pdf_dialog)
         self.action_export_svg = self._action("Exporter en SVG…", self.export_svg_dialog)
         self.action_batch = self._action("Traitement par lot…", self.batch_dialog)
         self.action_palette = self._action("Palette de commandes", self.show_command_palette, "Ctrl+K")
         self.action_update = self._action("Vérifier les mises à jour", self.check_updates)
+        self.action_preferences = self._action("Préférences…", self.preferences_dialog, "Ctrl+,")
         self.action_quit = self._action("Quitter", self.close, "Ctrl+Q")
         self.action_close_tab = self._action("Fermer l'onglet", self.close_current_tab, "Ctrl+W")
 
@@ -268,6 +279,7 @@ class MainWindow(QMainWindow):
         self.action_duplicate_layer = self._action("Dupliquer le calque", self.duplicate_layer, "Ctrl+J")
         self.action_delete_layer = self._action("Supprimer le calque", self.delete_layer)
         self.action_merge_layer = self._action("Fusionner vers le bas", self.merge_layer, "Ctrl+Shift+E")
+        self.action_layer_style = self._action("Styles du calque…", self.layer_style_dialog)
 
         self.action_zoom_in = self._action("Zoom avant", lambda: self.canvas.zoom_by(1.25), "Ctrl+=")
         self.action_zoom_out = self._action("Zoom arrière", lambda: self.canvas.zoom_by(1 / 1.25), "Ctrl+-")
@@ -277,6 +289,28 @@ class MainWindow(QMainWindow):
         self.action_grid = self._action("Afficher la grille", self.toggle_grid, "Ctrl+G",
                                         checkable=True)
         self.action_grid_size = self._action("Taille de la grille…", self.grid_size_dialog)
+        self.action_rulers = self._action("Afficher les règles", self.toggle_rulers,
+                                         checkable=True)
+        self.action_rulers.setChecked(True)
+        self.action_guides = self._action("Afficher les repères", self.toggle_guides,
+                                          checkable=True)
+        self.action_guides.setChecked(True)
+        self.action_snap = self._action("Magnétisme", self.toggle_snap, "Ctrl+Shift+;",
+                                        checkable=True)
+        self.action_snap.setChecked(True)
+        self.action_snap_grid = self._action("Aligner sur la grille", self.toggle_snap_grid,
+                                             checkable=True)
+        self.action_clear_guides = self._action("Effacer les repères", self.clear_guides)
+        self.action_view_left = self._action(
+            "Vue : pivoter à gauche", lambda: self.rotate_view(-90), "Ctrl+Shift+L")
+        self.action_view_right = self._action(
+            "Vue : pivoter à droite", lambda: self.rotate_view(90), "Ctrl+Shift+R")
+        self.action_view_flip_h = self._action(
+            "Vue : miroir horizontal", lambda: self.canvas.flip_view(True))
+        self.action_view_flip_v = self._action(
+            "Vue : miroir vertical", lambda: self.canvas.flip_view(False))
+        self.action_view_reset = self._action("Vue : réinitialiser", self.reset_view,
+                                              "Ctrl+Shift+0")
         self.action_light_theme = self._action("Thème clair", self.toggle_light_theme,
                                                 checkable=True)
 
@@ -307,11 +341,15 @@ class MainWindow(QMainWindow):
         for action in (self.action_save, self.action_save_as, self.action_export):
             file_menu.addAction(action)
         file_menu.addSeparator()
+        file_menu.addAction(self.action_print)
+        file_menu.addAction(self.action_print_preview)
+        file_menu.addSeparator()
         file_menu.addAction(self.action_export_pdf)
         file_menu.addAction(self.action_export_svg)
         file_menu.addAction(self.action_batch)
         file_menu.addSeparator()
         file_menu.addAction(self.action_close_tab)
+        file_menu.addAction(self.action_preferences)
         file_menu.addAction(self.action_quit)
 
         edit_menu = bar.addMenu("&Édition")
@@ -365,6 +403,8 @@ class MainWindow(QMainWindow):
         for action in (self.action_new_layer, self.action_duplicate_layer,
                        self.action_delete_layer, self.action_merge_layer):
             layer_menu.addAction(action)
+        layer_menu.addSeparator()
+        layer_menu.addAction(self.action_layer_style)
 
         tools_menu = bar.addMenu("&Outils")
         self.tools_menu = tools_menu
@@ -379,6 +419,18 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.action_grid)
         view_menu.addAction(self.action_grid_size)
+        view_menu.addSeparator()
+        view_menu.addAction(self.action_rulers)
+        view_menu.addAction(self.action_guides)
+        view_menu.addAction(self.action_snap)
+        view_menu.addAction(self.action_snap_grid)
+        view_menu.addAction(self.action_clear_guides)
+        view_menu.addSeparator()
+        view_menu.addAction(self.action_view_left)
+        view_menu.addAction(self.action_view_right)
+        view_menu.addAction(self.action_view_flip_h)
+        view_menu.addAction(self.action_view_flip_v)
+        view_menu.addAction(self.action_view_reset)
         view_menu.addSeparator()
         view_menu.addAction(self.action_light_theme)
         view_menu.addAction(self.action_fullscreen)
@@ -429,14 +481,18 @@ class MainWindow(QMainWindow):
         self.layers_dock = LayersDock(self)
         self.history_dock = HistoryDock(self)
         self.animation_dock = AnimationDock(self)
+        self.navigator_dock = NavigatorDock(self)
         self.addDockWidget(Qt.RightDockWidgetArea, self.color_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.layers_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.history_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.animation_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.navigator_dock)
         self.tabifyDockWidget(self.history_dock, self.animation_dock)
+        self.tabifyDockWidget(self.history_dock, self.navigator_dock)
         self.animation_dock.hide()
         self.animation_dock.visibilityChanged.connect(self._raise_animation)
         self.view_menu.addAction(self.animation_dock.toggleViewAction())
+        self.view_menu.addAction(self.navigator_dock.toggleViewAction())
         self.resizeDocks([self.color_dock, self.layers_dock, self.history_dock],
                          [220, 240, 220], Qt.Vertical)
 
@@ -581,6 +637,7 @@ class MainWindow(QMainWindow):
             )
             label = f"Sans titre {untitled}"
         state = {"doc": doc, "zoom": None, "pan": None, "label": label,
+                 "rotation": 0, "flip_h": False, "flip_v": False,
                  "autosave": autosave.new_slot()}
         self.tabs.append(state)
         self._tab_guard = True
@@ -606,6 +663,9 @@ class MainWindow(QMainWindow):
             current = self.tabs[self._active_index]
             current["zoom"] = self.canvas.zoom
             current["pan"] = QPointF(self.canvas.pan)
+            current["rotation"] = self.canvas.rotation
+            current["flip_h"] = self.canvas.flip_h
+            current["flip_v"] = self.canvas.flip_v
         self.commit_floating()
         state = self.tabs[index]
         self._active_index = index
@@ -613,6 +673,9 @@ class MainWindow(QMainWindow):
         self.tab_bar.setCurrentIndex(index)
         self._tab_guard = False
         self.set_document(state["doc"])
+        self.canvas.rotation = int(state.get("rotation", 0))
+        self.canvas.flip_h = bool(state.get("flip_h", False))
+        self.canvas.flip_v = bool(state.get("flip_v", False))
         if fit or state["zoom"] is None:
             self.canvas.fit()
         else:
@@ -695,6 +758,13 @@ class MainWindow(QMainWindow):
         if image is None:
             QMessageBox.warning(self, APP_NAME, "Format d'image non pris en charge.")
             return
+        if path.suffix.lower() == ".psd":
+            psd_doc = load_psd_document(path, self.settings.undo_budget_bytes)
+            if psd_doc is not None:
+                self._add_tab(psd_doc, fit=True)
+                self._add_recent(path)
+                self.notify(f"PSD importé avec {len(psd_doc.layers)} calque(s)")
+                return
         dpm = image.dotsPerMeterX()
         dpi = max(36, min(1200, int(round(dpm * 0.0254)))) if dpm > 0 else 96
         doc = Document(QSize(image.width(), image.height()),
@@ -769,14 +839,42 @@ class MainWindow(QMainWindow):
         if self.doc is None:
             return
         self.commit_floating()
+        dialog = ExportImageDialog(self, self.doc.size.width(), self.doc.size.height(),
+                                   self.doc.dpi)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        options = dialog.values()
+        suffix = options["suffix"]
+        filters = {
+            "png": "PNG (*.png)", "jpg": "JPEG (*.jpg)", "webp": "WebP (*.webp)",
+            "bmp": "BMP (*.bmp)", "tif": "TIFF (*.tif)",
+        }
         path, _ = QFileDialog.getSaveFileName(self, "Exporter une image",
-                                             self._default_name(".png"), EXPORT_FILTER)
-        if path:
-            target = Path(path)
-            if not target.suffix:
-                target = target.with_suffix(".png")
-            if export_image(self.doc, target):
-                self.notify(f"Image exportée : {target.name}")
+                                             self._default_name(f".{suffix}"),
+                                             filters[suffix])
+        if not path:
+            return
+        target = Path(path)
+        if not target.suffix:
+            target = target.with_suffix("." + suffix)
+        if export_image(self.doc, target, quality=options["quality"],
+                        size=options["size"], dpi=options["dpi"]):
+            self.notify(f"Image exportée : {target.name}")
+        else:
+            QMessageBox.warning(self, APP_NAME, "Échec de l'export.")
+
+    def print_preview(self) -> None:
+        if self.doc is None:
+            return
+        self.commit_floating()
+        print_document(self.doc, self, preview=True)
+
+    def print_current(self) -> None:
+        if self.doc is None:
+            return
+        self.commit_floating()
+        if print_document(self.doc, self, preview=False):
+            self.notify("Document envoyé à l'imprimante")
 
     def export_pdf_dialog(self) -> None:
         if self.doc is None:
@@ -827,6 +925,12 @@ class MainWindow(QMainWindow):
                  if p.suffix.lower() in self.DROP_SUFFIXES]
         written = batch_convert(files, output, width, fmt)
         self.notify(f"{len(written)} fichier(s) converti(s)")
+
+    def preferences_dialog(self) -> None:
+        dialog = PreferencesDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            dialog.apply()
+            self.notify("Préférences enregistrées")
 
     def show_command_palette(self) -> None:
         CommandPalette(self).exec()
@@ -949,6 +1053,10 @@ class MainWindow(QMainWindow):
         self.qsettings.setValue("ui/light", self.light_theme)
         self.qsettings.setValue("ui/grid", self.show_grid)
         self.qsettings.setValue("ui/grid_size", self.grid_size)
+        self.qsettings.setValue("ui/snap", self.snap_enabled)
+        self.qsettings.setValue("ui/snap_grid", self.snap_grid)
+        self.qsettings.setValue("ui/rulers", self.action_rulers.isChecked())
+        self.qsettings.setValue("ui/guides", self.action_guides.isChecked())
 
     def _restore_session(self) -> None:
         geometry = self.qsettings.value("window/geometry")
@@ -970,6 +1078,17 @@ class MainWindow(QMainWindow):
         if str(self.qsettings.value("ui/grid", "false")).lower() in ("1", "true", "yes"):
             self.show_grid = True
             self.action_grid.setChecked(True)
+        if str(self.qsettings.value("ui/snap", "true")).lower() not in ("1", "true", "yes"):
+            self.snap_enabled = False
+            self.action_snap.setChecked(False)
+        if str(self.qsettings.value("ui/snap_grid", "false")).lower() in ("1", "true", "yes"):
+            self.snap_grid = True
+            self.action_snap_grid.setChecked(True)
+        if str(self.qsettings.value("ui/rulers", "true")).lower() not in ("1", "true", "yes"):
+            self.action_rulers.setChecked(False)
+            self.canvas_host.set_rulers_visible(False)
+        if str(self.qsettings.value("ui/guides", "true")).lower() not in ("1", "true", "yes"):
+            self.action_guides.setChecked(False)
         if str(self.qsettings.value("ui/light", "false")).lower() in ("1", "true", "yes"):
             self.action_light_theme.setChecked(True)
             self.toggle_light_theme(True)
@@ -1251,6 +1370,18 @@ class MainWindow(QMainWindow):
         if self.doc is not None:
             self.doc.merge_down()
 
+    def layer_style_dialog(self) -> None:
+        if self.doc is None:
+            return
+        layer = self.doc.active_layer()
+        if layer is None:
+            return
+        dialog = LayerStyleDialog(self, layer.styles)
+        if dialog.exec() == QDialog.Accepted:
+            self.doc.set_layer_styles(self.doc.active_index, dialog.values())
+            self.canvas.update()
+            self.notify("Styles du calque mis à jour")
+
     def resize_dialog(self) -> None:
         if self.doc is None:
             return
@@ -1382,6 +1513,42 @@ class MainWindow(QMainWindow):
             self.show_grid = True
             self.canvas.update()
             self.notify(f"Grille : {self.grid_size} px")
+
+    def toggle_rulers(self, checked: bool) -> None:
+        self.canvas_host.set_rulers_visible(bool(checked))
+        self.canvas.fit()
+
+    def toggle_guides(self, checked: bool) -> None:
+        if self.doc is not None:
+            self.doc.guides_visible = bool(checked)
+        self.canvas.update()
+        self.notify("Repères affichés" if checked else "Repères masqués")
+
+    def toggle_snap(self, checked: bool) -> None:
+        self.snap_enabled = bool(checked)
+        self.notify("Magnétisme activé" if checked else "Magnétisme désactivé")
+
+    def toggle_snap_grid(self, checked: bool) -> None:
+        self.snap_grid = bool(checked)
+        self.notify("Alignement sur la grille activé" if checked
+                    else "Alignement sur la grille désactivé")
+
+    def clear_guides(self) -> None:
+        if self.doc is not None:
+            self.doc.clear_guides()
+            self.canvas.update()
+            self.notify("Repères effacés")
+
+    def rotate_view(self, angle: int) -> None:
+        self.canvas.rotate_view(angle)
+        self.notify(f"Vue pivotée de {abs(angle)}°")
+
+    def reset_view(self) -> None:
+        self.canvas.rotation = 0
+        self.canvas.flip_h = False
+        self.canvas.flip_v = False
+        self.canvas.fit()
+        self.notify("Vue réinitialisée")
 
     def toggle_light_theme(self, checked: bool) -> None:
         self.light_theme = bool(checked)

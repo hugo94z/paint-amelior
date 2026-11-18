@@ -64,7 +64,7 @@ def region_mask(region: QRegion | None, width: int, height: int) -> np.ndarray |
     painter.setClipRegion(region)
     painter.fillRect(QRect(0, 0, width, height), QColor(255, 255, 255))
     painter.end()
-    _, arr = image_array_view(image)
+    conv, arr = image_array_view(image)
     return arr[:, :, 3] > 0
 
 

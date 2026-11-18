@@ -102,6 +102,29 @@ def tool_icon(kind: str, color: str = "#e8eaed", size: int = 24) -> QIcon:
         painter.drawLine(QPointF(3, 6), QPointF(18, 6))
         painter.drawLine(QPointF(18, 6), QPointF(18, 21))
         painter.drawLine(QPointF(6, 18), QPointF(21, 18))
+    elif kind == "clone":
+        painter.drawRect(QRectF(4, 7, 11, 11))
+        painter.drawRect(QRectF(9, 3, 11, 11))
+        painter.drawLine(QPointF(14.5, 6.5), QPointF(14.5, 10.5))
+        painter.drawLine(QPointF(12.5, 8.5), QPointF(16.5, 8.5))
+    elif kind == "tone":
+        painter.drawEllipse(QPointF(12, 12), 5.5, 5.5)
+        for angle in range(0, 360, 45):
+            import math
+
+            rad = math.radians(angle)
+            painter.drawLine(
+                QPointF(12 + math.cos(rad) * 7.6, 12 + math.sin(rad) * 7.6),
+                QPointF(12 + math.cos(rad) * 9.6, 12 + math.sin(rad) * 9.6),
+            )
+    elif kind == "smudge":
+        path = QPainterPath()
+        path.moveTo(12, 4)
+        path.cubicTo(16.5, 10, 18.5, 12.5, 18.5, 15)
+        path.cubicTo(18.5, 18.6, 15.6, 21, 12, 21)
+        path.cubicTo(8.4, 21, 5.5, 18.6, 5.5, 15)
+        path.cubicTo(5.5, 12.5, 7.5, 10, 12, 4)
+        painter.drawPath(path)
     elif kind == "zoom":
         painter.drawEllipse(QPointF(10.5, 10.5), 5.5, 5.5)
         painter.drawLine(QPointF(15, 15), QPointF(20, 20))

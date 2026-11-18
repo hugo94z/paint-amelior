@@ -22,6 +22,9 @@ def save_project(doc: Document, path: str | Path, set_path: bool = True) -> bool
         "width": doc.size.width(),
         "height": doc.size.height(),
         "dpi": doc.dpi,
+        "guides_h": list(doc.guides_h),
+        "guides_v": list(doc.guides_v),
+        "guides_visible": bool(doc.guides_visible),
         "active": doc.active_index,
         "layers": [
             {
@@ -35,6 +38,7 @@ def save_project(doc: Document, path: str | Path, set_path: bool = True) -> bool
                 "locked": layer.locked,
                 "lock_alpha": layer.lock_alpha,
                 "adjustment": layer.adjustment,
+                "styles": layer.styles,
             }
             for index, layer in enumerate(doc.layers)
         ],
@@ -88,6 +92,11 @@ def load_project(path: str | Path, undo_budget: int = 400 * 1024 * 1024) -> Docu
                 layer.mask_enabled = bool(entry.get("mask_enabled", True))
                 adjustment = entry.get("adjustment")
                 layer.adjustment = dict(adjustment) if isinstance(adjustment, dict) else None
+                styles = entry.get("styles")
+                if isinstance(styles, dict):
+                    for key, value in styles.items():
+                        if key in layer.styles and isinstance(value, dict):
+                            layer.styles[key].update(value)
                 mask_name = entry.get("mask")
                 if mask_name:
                     try:
@@ -105,6 +114,11 @@ def load_project(path: str | Path, undo_budget: int = 400 * 1024 * 1024) -> Docu
                         "image": frame_image,
                         "duration": max(20, int(entry.get("duration", 120))),
                     })
+            doc.guides_h = [float(value) for value in data.get("guides_h", [])
+                            if 0 <= float(value) <= height]
+            doc.guides_v = [float(value) for value in data.get("guides_v", [])
+                            if 0 <= float(value) <= width]
+            doc.guides_visible = bool(data.get("guides_visible", True))
     except (OSError, KeyError, ValueError, zipfile.BadZipFile):
         return None
     if not doc.layers:

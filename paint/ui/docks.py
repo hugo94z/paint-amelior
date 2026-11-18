@@ -3,6 +3,8 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QLineEdit,
+    QInputDialog,
     QAbstractItemView,
     QCheckBox,
     QColorDialog,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..io.exporters import export_animation
+from .color_wheel import ColorWheel
 
 from ..layer import BLEND_MODES
 
@@ -531,21 +534,57 @@ class AnimationDock(QDockWidget):
 
 
 class ColorDock(QDockWidget):
+    NAMED_KEY = "palettes/named"
+    CUSTOM_KEY = "palettes/custom"
+
     def __init__(self, app):
         super().__init__("Couleurs")
         self.app = app
+        self._guard = False
         self.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        self._named = self._load_json(self.NAMED_KEY, {})
+        self._custom = self._load_json(self.CUSTOM_KEY, [])
+        if not isinstance(self._named, dict):
+            self._named = {}
+        if not isinstance(self._custom, list):
+            self._custom = []
+        self._palette_colors = list(PALETTE)
+
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
+        self.wheel = ColorWheel()
+        self.wheel.color_picked.connect(self._wheel_picked)
+        layout.addWidget(self.wheel, 1)
+        value_row = QHBoxLayout()
+        value_row.addWidget(QLabel("Valeur"))
+        self.value_slider = QSlider(Qt.Horizontal)
+        self.value_slider.setRange(0, 255)
+        self.value_slider.setValue(255)
+        value_row.addWidget(self.value_slider, 1)
+        layout.addLayout(value_row)
+        alpha_row = QHBoxLayout()
+        alpha_row.addWidget(QLabel("Alpha"))
+        self.alpha_slider = QSlider(Qt.Horizontal)
+        self.alpha_slider.setRange(0, 255)
+        self.alpha_slider.setValue(255)
+        alpha_row.addWidget(self.alpha_slider, 1)
+        layout.addLayout(alpha_row)
+        hex_row = QHBoxLayout()
+        self.hex_edit = QLineEdit()
+        self.hex_edit.setMaxLength(9)
+        self.hex_edit.setPlaceholderText("#RRGGBB")
+        hex_row.addWidget(self.hex_edit, 1)
+        layout.addLayout(hex_row)
+
         swatches = QHBoxLayout()
         self.fg_button = QPushButton()
-        self.fg_button.setFixedHeight(42)
+        self.fg_button.setFixedHeight(38)
         self.fg_button.setToolTip("Couleur d'avant-plan")
         self.fg_button.clicked.connect(self._pick_fg)
         self.bg_button = QPushButton()
-        self.bg_button.setFixedHeight(42)
+        self.bg_button.setFixedHeight(38)
         self.bg_button.setToolTip("Couleur d'arrière-plan")
         self.bg_button.clicked.connect(self._pick_bg)
         swatches.addWidget(self.fg_button, 1)
@@ -559,19 +598,42 @@ class ColorDock(QDockWidget):
         swap.addWidget(swap_button)
         swap.addWidget(reset_button)
         layout.addLayout(swap)
-        layout.addWidget(QLabel("Palette"))
-        grid = QGridLayout()
-        grid.setSpacing(3)
-        for index, name in enumerate(PALETTE):
-            button = QPushButton()
-            button.setFixedSize(26, 26)
-            button.setStyleSheet(
-                f"background:{name}; border:1px solid #14161a; border-radius:4px;"
-            )
-            button.setToolTip(name)
-            button.clicked.connect(lambda _=False, c=name: app.set_fg_color(QColor(c)))
-            grid.addWidget(button, index // 6, index % 6)
-        layout.addLayout(grid)
+
+        palette_header = QHBoxLayout()
+        palette_header.addWidget(QLabel("Palette"))
+        self.palette_box = QComboBox()
+        self.palette_box.setToolTip("Charger une palette enregistrée")
+        palette_header.addWidget(self.palette_box, 1)
+        self.palette_save = QToolButton()
+        self.palette_save.setText("+")
+        self.palette_save.setToolTip("Enregistrer la palette actuelle")
+        self.palette_delete = QToolButton()
+        self.palette_delete.setText("−")
+        self.palette_delete.setToolTip("Supprimer la palette sélectionnée")
+        palette_header.addWidget(self.palette_save)
+        palette_header.addWidget(self.palette_delete)
+        layout.addLayout(palette_header)
+
+        self.palette_container = QWidget()
+        self.palette_layout = QGridLayout(self.palette_container)
+        self.palette_layout.setSpacing(3)
+        self.palette_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.palette_container)
+
+        custom_header = QHBoxLayout()
+        custom_header.addWidget(QLabel("Mes couleurs"))
+        add_button = QToolButton()
+        add_button.setText("+")
+        add_button.setToolTip("Ajouter la couleur courante")
+        custom_header.addWidget(add_button)
+        custom_header.addStretch(1)
+        layout.addLayout(custom_header)
+        self.custom_container = QWidget()
+        self.custom_layout = QGridLayout(self.custom_container)
+        self.custom_layout.setSpacing(3)
+        self.custom_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.custom_container)
+
         layout.addWidget(QLabel("Couleurs récentes"))
         self.recent_container = QWidget()
         self.recent_layout = QGridLayout(self.recent_container)
@@ -580,9 +642,84 @@ class ColorDock(QDockWidget):
         layout.addWidget(self.recent_container)
         layout.addStretch(1)
         self.setWidget(container)
+
+        self.value_slider.valueChanged.connect(self._value_changed)
+        self.alpha_slider.valueChanged.connect(self._alpha_changed)
+        self.hex_edit.editingFinished.connect(self._hex_changed)
+        self.palette_save.clicked.connect(self._save_palette)
+        self.palette_delete.clicked.connect(self._delete_palette)
+        self.palette_box.currentIndexChanged.connect(self._palette_selected)
+        add_button.clicked.connect(self._add_custom)
         app.colors_changed.connect(self.refresh)
         app.doc_changed.connect(self.refresh)
+        self._fill_palette_combo()
+        self._fill_palette()
         self.refresh()
+
+    @staticmethod
+    def _load_json(key: str, fallback):
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings("PaintAmeliore", "PaintAmeliore")
+        raw = settings.value(key, "")
+        if not raw:
+            return fallback
+        try:
+            import json
+
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return fallback
+
+    @staticmethod
+    def _store_json(key: str, value) -> None:
+        from PySide6.QtCore import QSettings
+
+        import json
+
+        settings = QSettings("PaintAmeliore", "PaintAmeliore")
+        settings.setValue(key, json.dumps(value, ensure_ascii=False))
+
+    def _fill_palette_combo(self) -> None:
+        self._guard = True
+        self.palette_box.clear()
+        self.palette_box.addItem("Palette par défaut", None)
+        for name in sorted(self._named):
+            self.palette_box.addItem(name, name)
+        self._guard = False
+
+    def _clear_layout(self, layout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _fill_palette(self) -> None:
+        self._clear_layout(self.palette_layout)
+        for index, color in enumerate(self._palette_colors[:36]):
+            button = QPushButton()
+            button.setFixedSize(24, 24)
+            button.setStyleSheet(
+                f"background:{color}; border:1px solid #14161a; border-radius:4px;"
+            )
+            button.setToolTip(color)
+            button.clicked.connect(lambda _=False, c=color: self.app.set_fg_color(QColor(c)))
+            self.palette_layout.addWidget(button, index // 6, index % 6)
+
+    def _fill_custom(self) -> None:
+        self._clear_layout(self.custom_layout)
+        for index, color in enumerate(self._custom[:24]):
+            button = QPushButton()
+            button.setFixedSize(24, 24)
+            button.setStyleSheet(
+                f"background:{color}; border:1px solid #14161a; border-radius:4px;"
+            )
+            button.setToolTip(color)
+            button.clicked.connect(lambda _=False, c=color: self.app.set_fg_color(QColor(c)))
+            button.setContextMenuPolicy(Qt.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda _pos, i=index: self._remove_custom(i))
+            self.custom_layout.addWidget(button, index // 6, index % 6)
 
     def refresh(self) -> None:
         fg = self.app.fg.name()
@@ -597,10 +734,13 @@ class ColorDock(QDockWidget):
             f"color:{self._text_color(self.app.bg)};"
         )
         self.bg_button.setText(bg.upper())
-        while self.recent_layout.count():
-            item = self.recent_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self._guard = True
+        self.wheel.set_color(self.app.fg)
+        self.value_slider.setValue(self.app.fg.value())
+        self.alpha_slider.setValue(self.app.fg.alpha())
+        self.hex_edit.setText(self.app.fg.name(QColor.HexRgb).upper())
+        self._guard = False
+        self._clear_layout(self.recent_layout)
         for index, color in enumerate(self.app.recent[:12]):
             button = QPushButton()
             button.setFixedSize(24, 24)
@@ -610,6 +750,83 @@ class ColorDock(QDockWidget):
             button.setToolTip(color.name())
             button.clicked.connect(lambda _=False, c=color: self.app.set_fg_color(QColor(c)))
             self.recent_layout.addWidget(button, index // 6, index % 6)
+
+    def _wheel_picked(self, color: QColor) -> None:
+        if self._guard:
+            return
+        color.setAlpha(self.app.fg.alpha())
+        self.app.set_fg_color(color)
+
+    def _value_changed(self, value: int) -> None:
+        if self._guard:
+            return
+        self.wheel.set_value(value)
+        self.app.set_fg_color(self.wheel.color())
+
+    def _alpha_changed(self, value: int) -> None:
+        if self._guard:
+            return
+        self.wheel.set_alpha(value)
+        self.app.set_fg_color(self.wheel.color())
+
+    def _hex_changed(self) -> None:
+        text = self.hex_edit.text().strip()
+        if not text.startswith("#"):
+            text = "#" + text
+        color = QColor(text)
+        if color.isValid():
+            self.app.set_fg_color(color)
+        else:
+            self.refresh()
+
+    def _add_custom(self) -> None:
+        name = self.app.fg.name(QColor.HexArgb)
+        if name not in self._custom:
+            self._custom.insert(0, name)
+            del self._custom[24:]
+            self._store_json(self.CUSTOM_KEY, self._custom)
+            self._fill_custom()
+            self.app.notify("Couleur ajoutée à mes couleurs")
+
+    def _remove_custom(self, index: int) -> None:
+        if 0 <= index < len(self._custom):
+            del self._custom[index]
+            self._store_json(self.CUSTOM_KEY, self._custom)
+            self._fill_custom()
+
+    def _palette_selected(self, index: int) -> None:
+        if self._guard:
+            return
+        name = self.palette_box.itemData(index)
+        if name and name in self._named:
+            self._palette_colors = list(self._named[name])
+        else:
+            self._palette_colors = list(PALETTE)
+        self._fill_palette()
+
+    def _save_palette(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "Enregistrer la palette", "Nom :")
+        name = name.strip()
+        if not ok or not name:
+            return
+        self._named[name] = list(self._palette_colors)
+        self._store_json(self.NAMED_KEY, self._named)
+        self._fill_palette_combo()
+        self.palette_box.setCurrentIndex(self.palette_box.findData(name))
+        self.app.notify(f"Palette « {name} » enregistrée")
+
+    def _delete_palette(self) -> None:
+        name = self.palette_box.currentData()
+        if not name or name not in self._named:
+            return
+        del self._named[name]
+        self._store_json(self.NAMED_KEY, self._named)
+        self._fill_palette_combo()
+        self._palette_colors = list(PALETTE)
+        self._fill_palette()
+        self.app.notify(f"Palette « {name} » supprimée")
 
     def _pick_fg(self) -> None:
         color = QColorDialog.getColor(self.app.fg, self, "Couleur d'avant-plan",
@@ -626,3 +843,104 @@ class ColorDock(QDockWidget):
                                       QColorDialog.ShowAlphaChannel)
         if color.isValid():
             self.app.set_bg_color(color)
+
+
+class NavigatorView(QWidget):
+    def __init__(self, dock):
+        super().__init__()
+        self.dock = dock
+        self.setMinimumSize(180, 130)
+        self.setCursor(Qt.CrossCursor)
+        self._dragging = False
+
+    def _geometry(self):
+        from PySide6.QtCore import QRectF
+
+        doc = self.dock.app.doc
+        if doc is None:
+            return None, None
+        area = QRectF(self.rect()).adjusted(8, 8, -8, -8)
+        ratio = doc.size.width() / max(1, doc.size.height())
+        if area.width() / max(1.0, area.height()) > ratio:
+            height = area.height()
+            width = height * ratio
+        else:
+            width = area.width()
+            height = width / ratio
+        box = QRectF(
+            area.center().x() - width / 2,
+            area.center().y() - height / 2,
+            width,
+            height,
+        )
+        return doc, box
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#1b1d21"))
+        doc, box = self._geometry()
+        if doc is None or box is None:
+            painter.end()
+            return
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        preview = doc.preview_image if doc.preview_image is not None else doc.composite()
+        painter.setOpacity(0.85)
+        painter.drawImage(box, preview)
+        painter.setOpacity(1.0)
+        painter.setPen(QColor("#5b616b"))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(box)
+        canvas = self.dock.app.canvas
+        visible = canvas.visible_doc_rect()
+        if not visible.isEmpty():
+            scale_x = box.width() / max(1, doc.size.width())
+            scale_y = box.height() / max(1, doc.size.height())
+            rect = box.adjusted(visible.left() * scale_x, visible.top() * scale_y,
+                                -(doc.size.width() - visible.right() - 1) * scale_x,
+                                -(doc.size.height() - visible.bottom() - 1) * scale_y)
+            painter.setPen(QColor("#f97316"))
+            painter.drawRect(rect)
+        painter.end()
+
+    def _center(self, position) -> None:
+        doc, box = self._geometry()
+        if doc is None or box is None:
+            return
+        from PySide6.QtCore import QPointF
+
+        x = (position.x() - box.left()) / max(1e-6, box.width()) * doc.size.width()
+        y = (position.y() - box.top()) / max(1e-6, box.height()) * doc.size.height()
+        self.dock.app.canvas.center_on(QPointF(x, y))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._center(event.position())
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging:
+            self._center(event.position())
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._dragging = False
+
+
+class NavigatorDock(QDockWidget):
+    def __init__(self, app):
+        super().__init__("Navigateur")
+        self.app = app
+        self.setObjectName("navigator")
+        self.view = NavigatorView(self)
+        self.setWidget(self.view)
+        self._timer = QTimer(self)
+        self._timer.setInterval(180)
+        self._timer.timeout.connect(self.view.update)
+        app.doc_changed.connect(self.view.update)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
