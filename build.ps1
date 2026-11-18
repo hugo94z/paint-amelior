@@ -13,7 +13,7 @@ if (-not $SkipInstall) {
 }
 
 Write-Host "Construction de l'executable..." -ForegroundColor Cyan
-python -m PyInstaller --noconfirm --clean --windowed --name "Paint Ameliore" run.py
+python -m PyInstaller --noconfirm --clean --windowed --name "Paint Ameliore" --collect-all psd_tools run.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller a echoue." }
 
 $dist = Join-Path $PSScriptRoot "dist"

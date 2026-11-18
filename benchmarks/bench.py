@@ -9,12 +9,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import QPointF, QRect, QSize
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QRegion
 from PySide6.QtWidgets import QApplication
 
 from paint.brush import StampCache, StrokeBuffer, stamps_along
 from paint.document import Document
-from paint.filters import flood_fill
+from paint.filters import apply_to_document, flood_fill
 from paint.io.image_io import export_image
 
 
@@ -54,6 +54,14 @@ def main():
     timed("Remplissage complet (pot de peinture)", lambda: flood_fill(
         layer.image, 5, 5, QColor("#f97316"), 0
     ))
+
+    filter_doc = Document.new(width, height, QColor("white"))
+    filter_painter = QPainter(filter_doc.active_layer().image)
+    filter_painter.fillRect(QRect(2000, 1000, 512, 512), QColor("#2563eb"))
+    filter_painter.end()
+    filter_doc.set_selection(QRegion(QRect(2000, 1000, 512, 512)))
+    timed("Filtre flou sur selection 512", lambda: apply_to_document(
+        filter_doc, "blur", 4.0, "Flou"))
 
     tx = doc.history.begin("Bench")
     tx.touch(layer, QRect(0, 0, 512, 512))

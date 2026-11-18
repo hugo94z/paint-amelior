@@ -74,19 +74,23 @@ SAVE_FILTER = (
 )
 
 SHORTCUTS_TEXT = """<b>Outils</b><br>
-B pinceau • E gomme • G pot de peinture • I pipette<br>
+B pinceau • E gomme • S tampon • K densité • J goutte d'eau<br>
+G pot de peinture • I pipette<br>
 L ligne • R rectangle • O ellipse • U rectangle arrondi<br>
 Y polygone • D dégradé • T texte • M sélection<br><br>
 <b>Pinceau</b><br>
 [ / ] taille du pinceau • Alt pipette temporaire<br><br>
 <b>Fichier</b><br>
-Ctrl+N nouveau • Ctrl+O ouvrir • Ctrl+S enregistrer • Ctrl+Maj+S enregistrer sous<br><br>
+Ctrl+N nouveau • Ctrl+O ouvrir • Ctrl+S enregistrer • Ctrl+Maj+S enregistrer sous<br>
+Ctrl+E exporter • Ctrl+P imprimer • Ctrl+, préférences<br><br>
 <b>Édition</b><br>
 Ctrl+Z annuler • Ctrl+Y rétablir • Ctrl+X/C/V couper/copier/coller<br>
 Suppr effacer la sélection • Ctrl+A tout sélectionner • Ctrl+D désélectionner<br><br>
 <b>Affichage</b><br>
 Ctrl+molette zoom • molette défilement • Espace+glisser déplacement<br>
-Ctrl+0 ajuster • Ctrl+1 taille réelle • F11 plein écran<br><br>
+Ctrl+0 ajuster • Ctrl+1 taille réelle • F11 plein écran<br>
+Ctrl+Maj+L / R rotation de la vue • Ctrl+Maj+; magnétisme<br>
+Glisser depuis une règle pour créer un repère • Ctrl+glisser pour le déplacer<br><br>
 <b>Calques</b><br>
 Ctrl+Maj+N nouveau calque • Ctrl+J dupliquer • Ctrl+Maj+E fusionner vers le bas"""
 
