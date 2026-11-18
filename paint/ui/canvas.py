@@ -211,7 +211,7 @@ class Canvas(QWidget):
 
     def _guide_at(self, position: QPointF):
         doc = self.doc
-        if doc is None or not doc.guides_visible:
+        if doc is None or not doc.guides_visible or self.rotation % 360:
             return None
         tolerance = 5.0
         for index, value in enumerate(doc.guides_h):
