@@ -448,3 +448,5 @@ def test_clone_and_tone_tools(qapp):
     tone.release(QPointF(40, 40), None)
     assert gray.image.pixelColor(40, 40).lightness() > 128
     assert gray.image.pixelColor(2, 2).lightness() == 128
+    doc2.history.undo()
+    assert gray.image.pixelColor(40, 40).lightness() == 128

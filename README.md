@@ -1,11 +1,11 @@
 # Paint Amélioré
 
 ![tests](https://github.com/hugo94z/paint-amelior/actions/workflows/tests.yml/badge.svg)
-![version](https://img.shields.io/badge/version-1.6.0-blue)
+![version](https://img.shields.io/badge/version-1.6.1-blue)
 
 Clone de Paint réécrit en Python, avec PySide6 et numpy. Pensé pour être **plus rapide** qu'un Paint classique et **plus agréable** au quotidien : onglets, calques, sélection avancée, filtres avec aperçu, animation, impression et installateur Windows.
 
-Version actuelle : **1.6.0** (affichée dans la barre d'état et dans Aide → À propos).
+Version actuelle : **1.6.1** (affichée dans la barre d'état et dans Aide → À propos).
 
 ## Nouveautés 1.6
 
@@ -91,7 +91,7 @@ python -m venv .venv
 .\.venv\Scripts\python run.py
 ```
 
-Version installée : `python run.py --version` (affiche `Paint Amélioré 1.6.0`).
+Version installée : `python run.py --version` (affiche `Paint Amélioré 1.6.1`).
 
 ## Raccourcis
 
@@ -207,9 +207,9 @@ Déposez un fichier `.py` dans `plugins/` exposant `register(api)`. L'API fourni
 .\build.ps1                 # executable autonome + dist\Paint-Ameliore-win64.zip
 ```
 
-Un tag `v1.6.0` déclenche le workflow GitHub Actions qui construit l'exécutable et publie la release ; l'application vérifie ensuite les mises à jour via l'API GitHub. Un manifeste winget est fourni dans `packaging/winget/`.
+Un tag `v1.6.1` déclenche le workflow GitHub Actions qui construit l'exécutable et publie la release ; l'application vérifie ensuite les mises à jour via l'API GitHub. Un manifeste winget est fourni dans `packaging/winget/`.
 
-## Limites connues (1.6)
+## Limites connues (1.6.1)
 
 - Les **groupes de calques** (dossiers, opacité et fusion de groupe) ne sont pas encore implémentés : prévus pour la 1.7.
 - Import PSD : les groupes sont **aplatis** en calques nommés (pas de dossiers PSD).

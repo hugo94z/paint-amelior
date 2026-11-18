@@ -57,6 +57,13 @@ class SmudgeTool(BaseTool):
         stamp = self.app.stamp_cache.get(size, self.hardness, QColor(255, 255, 255))
         rect = QRect()
         for point in points:
+            stamp_rect = QRect(int(point.x() - half), int(point.y() - half), size, size)
+            rect = stamp_rect if rect.isNull() else rect.united(stamp_rect)
+        rect = rect.intersected(self.doc.rect())
+        if rect.isEmpty():
+            return
+        self._tx.touch(self._layer, rect)
+        for point in points:
             current = self._capture(point)
             blended = current.copy()
             painter = QPainter(blended)
@@ -77,11 +84,8 @@ class SmudgeTool(BaseTool):
             stamp_rect = QRect(int(point.x() - half), int(point.y() - half), size, size)
             rect = stamp_rect if rect.isNull() else rect.united(stamp_rect)
         self._last = pos
-        rect = rect.intersected(self.doc.rect())
-        if not rect.isEmpty():
-            self._tx.touch(self._layer, rect)
-            self.doc.invalidate(rect)
-            self.app.canvas.update()
+        self.doc.invalidate(rect)
+        self.app.canvas.update()
 
     def release(self, pos, event) -> None:
         if self._tx is not None:

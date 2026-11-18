@@ -23,6 +23,7 @@ class CloneTool(BaseTool):
         self.sample_all = True
         self.source: QPointF | None = None
         self._offset = QPointF(0, 0)
+        self._offset_set = False
         self._layer = None
         self._buffer = None
         self._tx = None
@@ -34,6 +35,7 @@ class CloneTool(BaseTool):
     def press(self, pos, event) -> None:
         if event is not None and event.modifiers() & Qt.AltModifier:
             self.source = QPointF(pos)
+            self._offset_set = False
             self.notify("Source du tampon définie")
             self.app.canvas.update()
             return
@@ -46,8 +48,9 @@ class CloneTool(BaseTool):
         self._layer = layer
         self._tx = self.doc.history.begin("Tampon de clonage")
         self._buffer = acquire_buffer(self.doc.size)
-        if not self.aligned or self.source is not None:
+        if not self.aligned or not self._offset_set:
             self._offset = QPointF(self.source.x() - pos.x(), self.source.y() - pos.y())
+            self._offset_set = True
         self._last = None
         self._paint_to(pos)
 

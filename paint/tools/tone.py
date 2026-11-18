@@ -58,6 +58,7 @@ class ToneTool(BaseTool):
         rect = rect.intersected(self.doc.rect())
         if rect.isEmpty():
             return
+        self._tx.touch(self._layer, rect)
         stamp = self.app.stamp_cache.get(size, self.hardness, QColor(255, 255, 255))
         mask = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
         mask.fill(Qt.transparent)
