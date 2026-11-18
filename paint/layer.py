@@ -48,6 +48,7 @@ class Layer:
         self.lock_alpha = False
         self.adjustment: dict | None = None
         self.styles = default_styles()
+        self.group_id: int | None = None
         self.image = QImage(size, QImage.Format_ARGB32_Premultiplied)
         self.image.fill(color if color is not None else Qt.transparent)
 
@@ -66,6 +67,7 @@ class Layer:
             "styles": {
                 key: dict(value) for key, value in self.styles.items()
             } if self.styles else default_styles(),
+            "group_id": self.group_id,
         }
 
     def restore(self, data: dict) -> None:
@@ -80,6 +82,37 @@ class Layer:
         self.adjustment = dict(data["adjustment"]) if data.get("adjustment") else None
         styles = data.get("styles")
         self.styles = {key: dict(value) for key, value in styles.items()} if styles else default_styles()
+        self.group_id = data.get("group_id")
 
     def has_styles(self) -> bool:
         return any(bool(style.get("enabled")) for style in self.styles.values())
+
+
+class LayerGroup:
+    def __init__(self, name: str, parent: int | None = None):
+        self.id = next(_ids)
+        self.name = name
+        self.visible = True
+        self.opacity = 1.0
+        self.blend = "normal"
+        self.expanded = True
+        self.parent = parent
+
+    def snapshot(self) -> dict:
+        return {
+            "group": self,
+            "name": self.name,
+            "visible": self.visible,
+            "opacity": self.opacity,
+            "blend": self.blend,
+            "expanded": self.expanded,
+            "parent": self.parent,
+        }
+
+    def restore(self, data: dict) -> None:
+        self.name = data["name"]
+        self.visible = data["visible"]
+        self.opacity = float(data["opacity"])
+        self.blend = data["blend"]
+        self.expanded = bool(data.get("expanded", True))
+        self.parent = data.get("parent")

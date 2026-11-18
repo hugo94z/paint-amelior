@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -41,7 +42,7 @@ from . import autosave
 from . import updater
 from .batch import convert as batch_convert
 from .brush import StampCache
-from .config import APP_NAME, APP_VERSION, Settings, load_settings
+from .config import APP_NAME, APP_VERSION, Settings, document_undo_budget, load_settings
 from .document import Document
 from .filters import apply_to_document
 from .io.image_io import EXPORT_FILTER, export_image, load_image
@@ -92,7 +93,8 @@ Ctrl+0 ajuster • Ctrl+1 taille réelle • F11 plein écran<br>
 Ctrl+Maj+L / R rotation de la vue • Ctrl+Maj+; magnétisme<br>
 Glisser depuis une règle pour créer un repère • Ctrl+glisser pour le déplacer<br><br>
 <b>Calques</b><br>
-Ctrl+Maj+N nouveau calque • Ctrl+J dupliquer • Ctrl+Maj+E fusionner vers le bas"""
+Ctrl+Maj+N nouveau calque • Ctrl+Maj+G grouper • Ctrl+J dupliquer<br>
+Ctrl+Maj+E fusionner vers le bas"""
 
 
 class TransformSelectionDialog(QDialog):
@@ -145,6 +147,7 @@ class MainWindow(QMainWindow):
         self.snap_grid = False
         self.light_theme = False
         self.qsettings = QSettings("PaintAmeliore", "PaintAmeliore")
+        self._apply_perf_overrides()
         self.recent_files = self._load_recent()
         self.stamp_cache = StampCache(settings.stamp_cache_bytes)
         self.fg = QColor("#111827")
@@ -198,6 +201,27 @@ class MainWindow(QMainWindow):
         self.autosave_timer.start()
         QTimer.singleShot(600, self._check_recovery)
         QTimer.singleShot(5000, self._auto_check_update)
+
+    def _apply_perf_overrides(self) -> None:
+        allocation = self.settings.allocation
+        logical = max(1, int(allocation.get("logical_cores") or os.cpu_count() or 4))
+        total = max(1024, int(allocation.get("ram_total_mb") or 4096))
+        pairs = (
+            ("perf/threads", "threads", 1, logical),
+            ("perf/app_ram_mb", "app_ram_mb", 256, min(32768, int(total * 0.85))),
+            ("perf/undo_mb", "undo_mb", 64, 16384),
+        )
+        for key, field, minimum, maximum in pairs:
+            try:
+                value = int(self.qsettings.value(key, allocation.get(field, minimum)))
+            except (TypeError, ValueError):
+                continue
+            allocation[field] = max(minimum, min(maximum, value))
+        app_ram = int(allocation.get("app_ram_mb", 1024))
+        allocation["doc_ram_mb"] = max(256, int(app_ram * 0.6))
+        allocation["stamp_cache_mb"] = max(48, min(1024, int(app_ram * 0.05)))
+        allocation["max_document_pixels"] = int(
+            allocation["doc_ram_mb"] * 1024 * 1024 / (4 * 3))
 
     def _action(self, text, slot, shortcut=None, checkable=False, icon=None) -> QAction:
         action = QAction(text, self)
@@ -284,6 +308,8 @@ class MainWindow(QMainWindow):
         self.action_delete_layer = self._action("Supprimer le calque", self.delete_layer)
         self.action_merge_layer = self._action("Fusionner vers le bas", self.merge_layer, "Ctrl+Shift+E")
         self.action_layer_style = self._action("Styles du calque…", self.layer_style_dialog)
+        self.action_group = self._action("Grouper le calque actif", self.group_layer, "Ctrl+Shift+G")
+        self.action_ungroup = self._action("Dissoudre le groupe sélectionné", self.ungroup_layer)
 
         self.action_zoom_in = self._action("Zoom avant", lambda: self.canvas.zoom_by(1.25), "Ctrl+=")
         self.action_zoom_out = self._action("Zoom arrière", lambda: self.canvas.zoom_by(1 / 1.25), "Ctrl+-")
@@ -407,6 +433,9 @@ class MainWindow(QMainWindow):
         for action in (self.action_new_layer, self.action_duplicate_layer,
                        self.action_delete_layer, self.action_merge_layer):
             layer_menu.addAction(action)
+        layer_menu.addSeparator()
+        layer_menu.addAction(self.action_group)
+        layer_menu.addAction(self.action_ungroup)
         layer_menu.addSeparator()
         layer_menu.addAction(self.action_layer_style)
 
@@ -723,7 +752,8 @@ class MainWindow(QMainWindow):
     def _create_document(self, width: int, height: int, background: QColor | None,
                          dpi: int = 96) -> None:
         doc = Document.new(width, height, background,
-                           undo_budget=self.settings.undo_budget_bytes, dpi=dpi)
+                           undo_budget=document_undo_budget(
+                               width, height, self.settings.undo_budget_bytes), dpi=dpi)
         doc.invalidate_all()
         self._add_tab(doc, fit=True)
         self.notify(f"Document {width} × {height} px à {dpi} dpi créé")
@@ -734,7 +764,8 @@ class MainWindow(QMainWindow):
 
     def new_document_dialog(self) -> None:
         width, height, dpi = load_last_sheet(self.qsettings)
-        dialog = NewSheetDialog(self, self.qsettings, width, height, dpi)
+        dialog = NewSheetDialog(self, self.qsettings, width, height, dpi,
+                                self.settings.doc_ram_bytes)
         if dialog.exec() == QDialog.Accepted:
             width, height = dialog.document_size()
             self._create_document(width, height, dialog.background_color(),
@@ -772,7 +803,9 @@ class MainWindow(QMainWindow):
         dpm = image.dotsPerMeterX()
         dpi = max(36, min(1200, int(round(dpm * 0.0254)))) if dpm > 0 else 96
         doc = Document(QSize(image.width(), image.height()),
-                       undo_budget=self.settings.undo_budget_bytes, dpi=dpi)
+                       undo_budget=document_undo_budget(
+                           image.width(), image.height(), self.settings.undo_budget_bytes),
+                       dpi=dpi)
         layer = Layer(path.stem or "Image", doc.size)
         layer.image = image
         doc.add_layer_raw(layer)
@@ -1385,6 +1418,29 @@ class MainWindow(QMainWindow):
             self.doc.set_layer_styles(self.doc.active_index, dialog.values())
             self.canvas.update()
             self.notify("Styles du calque mis à jour")
+
+    def group_layer(self) -> None:
+        doc = self.doc
+        if doc is None or doc.active_layer() is None:
+            return
+        if doc.active_layer().group_id is not None:
+            self.notify("Le calque actif est déjà dans un groupe")
+            return
+        group = doc.add_group(indices=[doc.active_index])
+        self.layers_dock.refresh()
+        self.notify(f"Groupe « {group.name} » créé")
+
+    def ungroup_layer(self) -> None:
+        doc = self.doc
+        layer = doc.active_layer() if doc is not None else None
+        if doc is None or layer is None or layer.group_id is None:
+            self.notify("Le calque actif n'est pas dans un groupe")
+            return
+        group = doc.group_by_id(layer.group_id)
+        name = group.name if group is not None else "Groupe"
+        doc.remove_group(layer.group_id, delete_layers=False)
+        self.layers_dock.refresh()
+        self.notify(f"Groupe « {name} » dissous")
 
     def resize_dialog(self) -> None:
         if self.doc is None:

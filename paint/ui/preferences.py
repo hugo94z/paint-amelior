@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import os
+
+from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QDoubleSpinBox,
     QFormLayout,
     QLabel,
     QSpinBox,
     QVBoxLayout,
 )
 
-from ..sheet import MAX_SIDE
+from ..sheet import MAX_SIDE, human_bytes
 from .sheet_dialog import load_last_sheet, store_last_sheet
 
 
@@ -21,7 +23,11 @@ class PreferencesDialog(QDialog):
         super().__init__(app)
         self.app = app
         self.setWindowTitle("Préférences")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(460)
+        allocation = app.settings.allocation
+        logical = max(1, int(allocation.get("logical_cores") or os.cpu_count() or 4))
+        total = max(1024, int(allocation.get("ram_total_mb") or 4096))
+        app_ram = max(256, int(allocation.get("app_ram_mb", 1024)))
 
         self.theme = QComboBox()
         self.theme.addItem("Sombre", False)
@@ -33,8 +39,18 @@ class PreferencesDialog(QDialog):
         self.autosave.setSuffix(" s")
         self.autosave.setValue(max(15, int(app.autosave_timer.interval() / 1000)))
 
+        self.threads = QSpinBox()
+        self.threads.setRange(1, logical)
+        self.threads.setSuffix(" threads")
+        self.threads.setValue(app.settings.threads)
+
+        self.app_ram = QSpinBox()
+        self.app_ram.setRange(256, min(32768, int(total * 0.85)))
+        self.app_ram.setSuffix(" Mo")
+        self.app_ram.setValue(app_ram)
+
         self.undo = QSpinBox()
-        self.undo.setRange(64, 8192)
+        self.undo.setRange(64, 16384)
         self.undo.setSuffix(" Mo")
         self.undo.setValue(max(64, int(app.settings.undo_budget_bytes / (1024 * 1024))))
 
@@ -65,10 +81,30 @@ class PreferencesDialog(QDialog):
         self.rulers = QCheckBox("Afficher les règles")
         self.rulers.setChecked(app.action_rulers.isChecked())
 
+        hardware = QLabel(
+            f"{allocation.get('physical_cores') or '?'} cœurs physiques / "
+            f"{logical} logiques • RAM {total / 1024:.1f} Go dont "
+            f"{int(allocation.get('ram_available_mb') or 0) / 1024:.1f} Go disponibles"
+        )
+        hardware.setWordWrap(True)
+        hardware.setStyleSheet("color:#7f858f;")
+        recommended = QLabel(
+            f"Conseillé par le scan : {allocation.get('threads')} threads, "
+            f"{int(allocation.get('app_ram_mb', 0))} Mo pour l'application, "
+            f"{int(allocation.get('undo_mb', 0))} Mo d'historique, "
+            f"{int(allocation.get('doc_ram_mb', 0))} Mo par document."
+        )
+        recommended.setWordWrap(True)
+        recommended.setStyleSheet("color:#7f858f;")
+
         form = QFormLayout()
         form.addRow("Thème", self.theme)
         form.addRow("Sauvegarde automatique", self.autosave)
+        form.addRow(hardware)
+        form.addRow("Threads CPU", self.threads)
+        form.addRow("Mémoire de l'application", self.app_ram)
         form.addRow("Budget d'annulation", self.undo)
+        form.addRow(recommended)
         sheet = QLabel(f"{width} × {height} px à {dpi} dpi")
         form.addRow("Format par défaut", sheet)
         form.addRow("Largeur", self.sheet_width)
@@ -79,7 +115,11 @@ class PreferencesDialog(QDialog):
         form.addRow("", self.snap)
         form.addRow("", self.snap_grid)
         form.addRow("", self.rulers)
-        note = QLabel("Le budget d'annulation s'applique aux documents ouverts.")
+        note = QLabel(
+            "Les budgets s'appliquent immédiatement aux documents ouverts. "
+            "Les threads BLAS seront pleinement appliqués au prochain démarrage."
+        )
+        note.setWordWrap(True)
         note.setStyleSheet("color:#7f858f;")
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -88,6 +128,11 @@ class PreferencesDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(note)
         layout.addWidget(buttons)
+        self.app_ram.valueChanged.connect(self._ram_changed)
+        self._ram_changed(self.app_ram.value())
+
+    def _ram_changed(self, value: int) -> None:
+        self.undo.setMaximum(max(64, min(16384, int(value * 0.55))))
 
     def apply(self) -> None:
         app = self.app
@@ -96,14 +141,26 @@ class PreferencesDialog(QDialog):
             app.action_light_theme.setChecked(light)
             app.toggle_light_theme(light)
         app.autosave_timer.setInterval(self.autosave.value() * 1000)
-        budget = self.undo.value() * 1024 * 1024
-        if budget != app.settings.undo_budget_bytes:
-            app.settings.allocation["undo_mb"] = self.undo.value()
-            for state in app.tabs:
-                doc = state.get("doc")
-                if doc is not None:
-                    doc.history.budget_bytes = budget
-                    doc.history._trim()
+        allocation = app.settings.allocation
+        allocation["threads"] = self.threads.value()
+        allocation["app_ram_mb"] = self.app_ram.value()
+        allocation["doc_ram_mb"] = max(256, int(self.app_ram.value() * 0.6))
+        allocation["stamp_cache_mb"] = max(48, min(1024, int(self.app_ram.value() * 0.05)))
+        allocation["max_document_pixels"] = int(
+            allocation["doc_ram_mb"] * 1024 * 1024 / (4 * 3))
+        allocation["undo_mb"] = self.undo.value()
+        QThreadPool.globalInstance().setMaxThreadCount(self.threads.value())
+        app.stamp_cache.budget_bytes = app.settings.stamp_cache_bytes
+        app.stamp_cache.trim()
+        budget = app.settings.undo_budget_bytes
+        for state in app.tabs:
+            doc = state.get("doc")
+            if doc is not None:
+                doc.history.budget_bytes = budget
+                doc.history._trim()
+        app.qsettings.setValue("perf/threads", self.threads.value())
+        app.qsettings.setValue("perf/app_ram_mb", self.app_ram.value())
+        app.qsettings.setValue("perf/undo_mb", self.undo.value())
         store_last_sheet(app.qsettings, self.sheet_width.value(),
                          self.sheet_height.value(), self.sheet_dpi.value())
         app.grid_size = self.grid_size.value()
@@ -117,3 +174,7 @@ class PreferencesDialog(QDialog):
         app.canvas_host.set_rulers_visible(self.rulers.isChecked())
         app.canvas.update()
         app.qsettings.sync()
+        app.notify(
+            f"Performances : {self.threads.value()} threads, "
+            f"{human_bytes(app.settings.doc_ram_bytes)} par document"
+        )

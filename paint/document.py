@@ -16,7 +16,7 @@ from PySide6.QtGui import (
 )
 
 from .history import History, LayerCommand
-from .layer import Layer
+from .layer import Layer, LayerGroup
 from .utils import (
     array_to_image,
     blur_alpha,
@@ -105,6 +105,32 @@ class LayerPropsCommand:
         doc.layers_changed.emit()
 
 
+class GroupPropsCommand:
+    def __init__(self, label: str, group, before: dict, after: dict, merge_key: str = ""):
+        self.label = label
+        self.group = group
+        self.before = before
+        self.after = after
+        self.merge_key = merge_key
+        self.bounds = None
+        self._stamp = time.monotonic()
+
+    def nbytes(self) -> int:
+        return 0
+
+    def merge(self, after: dict) -> bool:
+        if time.monotonic() - self._stamp > 1.5:
+            return False
+        self.after = after
+        self._stamp = time.monotonic()
+        return True
+
+    def restore(self, doc, use_before: bool) -> None:
+        self.group.restore(self.before if use_before else self.after)
+        doc.invalidate_all()
+        doc.layers_changed.emit()
+
+
 class Document(QObject):
     dirty = Signal(QRect)
     layers_changed = Signal()
@@ -119,6 +145,7 @@ class Document(QObject):
         self._size = QSize(max(1, size.width()), max(1, size.height()))
         self.dpi = max(36, min(1200, int(dpi)))
         self.layers: list[Layer] = []
+        self.groups: list[LayerGroup] = []
         self.active_index = -1
         self.selection: QRegion | None = None
         self.selection_path: QPainterPath | None = None
@@ -171,6 +198,20 @@ class Document(QObject):
                 return layer
         return None
 
+    def group_by_id(self, group_id: int | None) -> LayerGroup | None:
+        if group_id is None:
+            return None
+        for group in self.groups:
+            if group.id == group_id:
+                return group
+        return None
+
+    def layer_index(self, layer_id: int) -> int:
+        for index, layer in enumerate(self.layers):
+            if layer.id == layer_id:
+                return index
+        return -1
+
     def add_layer_raw(self, layer: Layer) -> Layer:
         self.layers.append(layer)
         if self.active_index < 0:
@@ -180,6 +221,7 @@ class Document(QObject):
     def _snapshot(self) -> dict:
         return {
             "layers": [(layer, layer.snapshot()) for layer in self.layers],
+            "groups": [(group, group.snapshot()) for group in self.groups],
             "active": self.active_index,
         }
 
@@ -189,6 +231,11 @@ class Document(QObject):
             layer.restore(data)
             layers.append(layer)
         self.layers = layers
+        groups = []
+        for group, data in state.get("groups", []):
+            group.restore(data)
+            groups.append(group)
+        self.groups = groups
         self.active_index = min(max(state["active"], 0), max(0, len(self.layers) - 1))
         self.selection = None
         self.selection_path = None
@@ -203,9 +250,12 @@ class Document(QObject):
                   label: str = "Nouveau calque") -> Layer:
         before = self._snapshot()
         layer = Layer(name or f"Calque {len(self.layers) + 1}", self.size, color)
+        active = self.active_layer()
+        layer.group_id = active.group_id if active is not None else None
         index = self.active_index + 1 if self.active_index >= 0 else len(self.layers)
         self.layers.insert(index, layer)
         self.active_index = index
+        self._compact_groups()
         self.history.push(LayerCommand(label, before, self._snapshot()))
         self.layers_changed.emit()
         self.invalidate_all()
@@ -234,8 +284,11 @@ class Document(QObject):
         copy.visible = layer.visible
         copy.opacity = layer.opacity
         copy.blend = layer.blend
+        copy.group_id = layer.group_id
+        copy.styles = {key: dict(value) for key, value in layer.styles.items()}
         self.layers.insert(self.active_index + 1, copy)
         self.active_index += 1
+        self._compact_groups()
         self.history.push(LayerCommand("Duplication du calque", before, self._snapshot()))
         self.layers_changed.emit()
         self.invalidate_all()
@@ -247,6 +300,7 @@ class Document(QObject):
         before = self._snapshot()
         self.layers[index], self.layers[target] = self.layers[target], self.layers[index]
         self.active_index = target
+        self._compact_groups()
         self.history.push(LayerCommand("Réorganisation des calques", before, self._snapshot()))
         self.layers_changed.emit()
         self.invalidate_all()
@@ -265,9 +319,233 @@ class Document(QObject):
         before = self._snapshot()
         self.layers = list(reversed(new_top))
         self.active_index = self.layers.index(active) if active in self.layers else 0
+        self._compact_groups()
         self.history.push(LayerCommand("Réorganisation des calques", before, self._snapshot()))
         self.layers_changed.emit()
         self.invalidate_all()
+
+    def add_group(self, name: str | None = None, indices: list[int] | None = None) -> LayerGroup:
+        before = self._snapshot()
+        group = LayerGroup(name or f"Groupe {len(self.groups) + 1}")
+        self.groups.append(group)
+        if indices is None:
+            indices = [self.active_index]
+        for index in sorted({int(value) for value in indices}):
+            if 0 <= index < len(self.layers):
+                self.layers[index].group_id = group.id
+        self._compact_groups()
+        self.history.push(LayerCommand("Nouveau groupe", before, self._snapshot()))
+        self.layers_changed.emit()
+        self.invalidate_all()
+        self.mark_modified(True)
+        return group
+
+    def remove_group(self, group_id: int, delete_layers: bool = False) -> None:
+        group = self.group_by_id(group_id)
+        if group is None:
+            return
+        before = self._snapshot()
+        if delete_layers:
+            def belongs(layer) -> bool:
+                return self._group_contains(group_id, layer.group_id)
+
+            self.layers = [layer for layer in self.layers if not belongs(layer)]
+            self.groups = [item for item in self.groups
+                           if item.id != group_id and not self._group_contains(group_id, item.parent)]
+        else:
+            for layer in self.layers:
+                if layer.group_id == group_id:
+                    layer.group_id = group.parent
+            for child in self.groups:
+                if child.parent == group_id:
+                    child.parent = group.parent
+            self.groups = [item for item in self.groups if item.id != group_id]
+        if not self.layers:
+            self.add_layer_raw(Layer("Calque 1", self._size))
+        self.active_index = min(max(0, self.active_index), len(self.layers) - 1)
+        self._compact_groups()
+        self.history.push(LayerCommand(
+            "Suppression du groupe" if delete_layers else "Dissolution du groupe",
+            before, self._snapshot()))
+        self.layers_changed.emit()
+        self.invalidate_all()
+        self.mark_modified(True)
+
+    def assign_to_group(self, indices, group_id: int | None) -> None:
+        if group_id is not None and self.group_by_id(group_id) is None:
+            return
+        before = self._snapshot()
+        changed = False
+        for index in sorted({int(value) for value in indices}):
+            if 0 <= index < len(self.layers):
+                layer = self.layers[index]
+                if layer.group_id != group_id:
+                    layer.group_id = group_id
+                    changed = True
+        if not changed:
+            return
+        self._compact_groups()
+        self.history.push(LayerCommand("Déplacement dans un groupe", before,
+                                       self._snapshot()))
+        self.layers_changed.emit()
+        self.invalidate_all()
+        self.mark_modified(True)
+
+    def set_group_props(self, group_id: int, visible: bool | None = None,
+                        opacity: float | None = None, blend: str | None = None,
+                        name: str | None = None, expanded: bool | None = None,
+                        parent: int | None = None) -> None:
+        group = self.group_by_id(group_id)
+        if group is None:
+            return
+        if expanded is not None:
+            group.expanded = bool(expanded)
+            self.layers_changed.emit()
+            return
+        before = group.snapshot()
+        visual = False
+        refresh = False
+        changed: list[str] = []
+        if visible is not None and bool(visible) != group.visible:
+            group.visible = bool(visible)
+            visual = True
+            changed.append("visible")
+        if opacity is not None:
+            value = max(0.0, min(1.0, opacity))
+            if value != group.opacity:
+                group.opacity = value
+                visual = True
+                changed.append("opacity")
+        if blend is not None and blend in BLEND and blend != group.blend:
+            group.blend = blend
+            visual = True
+            changed.append("blend")
+        if name is not None and name and name != group.name:
+            group.name = name
+            refresh = True
+            changed.append("name")
+        if parent is not None or (parent is None and changed and False):
+            if self._valid_group_parent(group_id, parent):
+                if group.parent != parent:
+                    group.parent = parent
+                    refresh = True
+                    changed.append("parent")
+        if visual:
+            self.invalidate_all()
+        if refresh:
+            self.layers_changed.emit()
+        if not changed:
+            return
+        labels = {
+            "visible": "Visibilité du groupe", "opacity": "Opacité du groupe",
+            "blend": "Mode de fusion du groupe", "name": "Renommage du groupe",
+            "parent": "Parent du groupe",
+        }
+        after = group.snapshot()
+        last = self.history._undo[-1] if self.history._undo else None
+        key = ",".join(changed)
+        if (isinstance(last, GroupPropsCommand) and last.group is group
+                and last.merge_key == key and not self.history._redo and last.merge(after)):
+            self.history.changed.emit()
+        else:
+            self.history.push(GroupPropsCommand(
+                labels.get(changed[0], "Propriétés du groupe"), group, before, after, key))
+        if changed == ["parent"]:
+            self._compact_groups()
+        self.mark_modified(True)
+
+    def rebuild_tree(self, layer_ids_top: list[int], memberships: dict[int, int | None],
+                     parents: dict[int, int | None]) -> None:
+        by_id = {layer.id: layer for layer in self.layers}
+        if len(layer_ids_top) != len(self.layers) or any(
+                layer_id not in by_id for layer_id in layer_ids_top):
+            return
+        before = self._snapshot()
+        self.layers = [by_id[layer_id] for layer_id in reversed(layer_ids_top)]
+        for layer in self.layers:
+            layer.group_id = memberships.get(layer.id)
+        for group in self.groups:
+            if group.id in parents:
+                group.parent = parents[group.id]
+        self._repair_groups()
+        self.active_index = max(0, min(self.active_index, len(self.layers) - 1))
+        self.history.push(LayerCommand("Réorganisation des calques", before,
+                                       self._snapshot()))
+        self.layers_changed.emit()
+        self.invalidate_all()
+        self.mark_modified(True)
+
+    def _valid_group_parent(self, group_id: int, parent: int | None) -> bool:
+        if parent is None:
+            return True
+        if parent == group_id:
+            return False
+        current = parent
+        seen = 0
+        while current is not None and seen < 64:
+            if current == group_id:
+                return False
+            group = self.group_by_id(current)
+            if group is None:
+                return False
+            current = group.parent
+            seen += 1
+        return True
+
+    def _group_contains(self, group_id: int, child_id: int | None) -> bool:
+        current = child_id
+        seen = 0
+        while current is not None and seen < 64:
+            if current == group_id:
+                return True
+            group = self.group_by_id(current)
+            if group is None:
+                return False
+            current = group.parent
+            seen += 1
+        return False
+
+    def _repair_groups(self) -> None:
+        ids = {group.id for group in self.groups}
+        for layer in self.layers:
+            if layer.group_id is not None and layer.group_id not in ids:
+                layer.group_id = None
+        for group in self.groups:
+            if group.parent is not None and group.parent not in ids:
+                group.parent = None
+        for group in self.groups:
+            if not self._valid_group_parent(group.id, group.parent):
+                group.parent = None
+
+    def _compact_groups(self) -> None:
+        changed = False
+        for group in self.groups:
+            indices = [index for index, layer in enumerate(self.layers)
+                       if layer.group_id == group.id]
+            if not indices:
+                continue
+            start = indices[0]
+            members = [self.layers[index] for index in indices]
+            rest = [layer for layer in self.layers if layer.group_id != group.id]
+            insert = sum(1 for layer in self.layers[:start] if layer.group_id != group.id)
+            if insert + len(members) <= len(rest):
+                candidate = rest[:insert] + members + rest[insert:]
+                if candidate != self.layers:
+                    active = self.active_layer()
+                    self.layers = candidate
+                    if active is not None and active in self.layers:
+                        self.active_index = self.layers.index(active)
+                    changed = True
+        if changed:
+            self.invalidate_all()
+
+    def group_layer_indices(self, group_id: int) -> list[int]:
+        direct = [index for index, layer in enumerate(self.layers)
+                  if layer.group_id == group_id]
+        for child in self.groups:
+            if child.parent == group_id:
+                direct.extend(self.group_layer_indices(child.id))
+        return sorted(direct)
 
     def merge_down(self) -> None:
         index = self.active_index
@@ -437,9 +715,12 @@ class Document(QObject):
         before = self._snapshot()
         layer = Layer("Réglage " + labels.get(kind, kind).lower(), self._size)
         layer.adjustment = {"type": kind, "value": float(value)}
+        active = self.active_layer()
+        layer.group_id = active.group_id if active is not None else None
         index = self.active_index + 1 if self.active_index >= 0 else len(self.layers)
         self.layers.insert(index, layer)
         self.active_index = index
+        self._compact_groups()
         self.history.push(LayerCommand("Calque de réglage", before, self._snapshot()))
         self.layers_changed.emit()
         self.invalidate_all()
@@ -449,23 +730,54 @@ class Document(QObject):
         painter = QPainter(self._cache)
         painter.setCompositionMode(QPainter.CompositionMode_Source)
         painter.fillRect(rect, Qt.transparent)
-        visible = [
-            layer for layer in self.layers
-            if layer.visible and (layer.adjustment is not None or layer.opacity > 0.0)
-        ]
-        if (len(visible) == 1 and visible[0].blend == "normal"
-                and visible[0].opacity >= 0.999 and visible[0].mask is None
-                and visible[0].adjustment is None and not visible[0].has_styles()):
-            painter.drawImage(rect, visible[0].image, rect)
-            painter.end()
+        painter.end()
+        self._render_tree(None, rect, self._cache)
+
+    def _tree_items(self, parent_id: int | None):
+        positions = {layer.id: index for index, layer in enumerate(self.layers)}
+        items = []
+        for layer in self.layers:
+            if layer.group_id == parent_id:
+                items.append((positions[layer.id], 0, "layer", layer))
+        for group in self.groups:
+            if group.parent != parent_id:
+                continue
+            indices = [positions[layer.id] for layer in self.layers
+                       if self._group_contains(group.id, layer.group_id)]
+            if indices:
+                items.append((min(indices), 1, "group", group))
+        items.sort(key=lambda item: (item[0], item[1]))
+        return [(kind, obj) for _, _, kind, obj in items]
+
+    def _render_tree(self, parent_id: int | None, rect: QRect, target: QImage) -> None:
+        items = self._tree_items(parent_id)
+        if not items:
             return
+        painter = QPainter(target)
         first = True
         temp = None
-        for layer in visible:
+        for kind, obj in items:
+            if kind == "group":
+                if not obj.visible or obj.opacity <= 0.0:
+                    continue
+                group_image = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
+                group_image.fill(Qt.transparent)
+                self._render_tree(obj.id, rect, group_image)
+                painter.setOpacity(obj.opacity)
+                mode = QPainter.CompositionMode_SourceOver if first else BLEND.get(
+                    obj.blend, QPainter.CompositionMode_SourceOver)
+                painter.setCompositionMode(mode)
+                painter.drawImage(rect.topLeft(), group_image)
+                painter.setOpacity(1.0)
+                first = False
+                continue
+            layer = obj
+            if not layer.visible or (layer.adjustment is None and layer.opacity <= 0.0):
+                continue
             if layer.adjustment is not None:
                 painter.end()
-                self._apply_adjustment(layer, rect)
-                painter = QPainter(self._cache)
+                self._apply_adjustment(layer, rect, target)
+                painter = QPainter(target)
                 first = False
                 continue
             painter.setOpacity(layer.opacity)
@@ -474,7 +786,8 @@ class Document(QObject):
             )
             painter.setCompositionMode(mode)
             styled = self._styled_image(layer, rect) if layer.has_styles() else None
-            if (layer.mask is not None and layer.mask_enabled and not layer.mask.isNull()) or styled:
+            has_mask = layer.mask is not None and layer.mask_enabled and not layer.mask.isNull()
+            if has_mask or styled is not None:
                 if temp is None or temp.size() != rect.size():
                     temp = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
                 temp.fill(Qt.transparent)
@@ -484,7 +797,7 @@ class Document(QObject):
                 else:
                     layer_painter.drawImage(0, 0, layer.image, rect.x(), rect.y(),
                                             rect.width(), rect.height())
-                if layer.mask is not None and layer.mask_enabled and not layer.mask.isNull():
+                if has_mask:
                     layer_painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
                     layer_painter.drawImage(0, 0, layer.mask, rect.x(), rect.y(),
                                             rect.width(), rect.height())
@@ -573,17 +886,18 @@ class Document(QObject):
         self._push_props(layer, before, layer.snapshot(), "Styles du calque", "styles")
         self.mark_modified(True)
 
-    def _apply_adjustment(self, layer, rect: QRect) -> None:
+    def _apply_adjustment(self, layer, rect: QRect, target: QImage | None = None) -> None:
         from .filters import apply
 
-        crop = self._cache.copy(rect)
+        base = target if target is not None else self._cache
+        crop = base.copy(rect)
         adjustment = layer.adjustment or {}
         try:
             adjusted = apply(crop, adjustment.get("type", "brightness"),
                              float(adjustment.get("value", 1.0)))
         except (ValueError, OSError):
             return
-        painter = QPainter(self._cache)
+        painter = QPainter(base)
         painter.setOpacity(max(0.0, min(1.0, layer.opacity)))
         if layer.mask is not None and layer.mask_enabled and not layer.mask.isNull():
             local_mask = layer.mask.copy(rect)

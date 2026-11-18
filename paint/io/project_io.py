@@ -6,8 +6,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize
 
-from ..document import Document
-from ..layer import Layer
+from ..config import document_undo_budget
+from ..document import BLEND, Document
+from ..layer import Layer, LayerGroup
 from .image_io import image_to_png_bytes, png_bytes_to_image
 
 PROJECT_SUFFIX = ".paint"
@@ -26,6 +27,18 @@ def save_project(doc: Document, path: str | Path, set_path: bool = True) -> bool
         "guides_v": list(doc.guides_v),
         "guides_visible": bool(doc.guides_visible),
         "active": doc.active_index,
+        "groups": [
+            {
+                "id": group.id,
+                "name": group.name,
+                "visible": group.visible,
+                "opacity": group.opacity,
+                "blend": group.blend,
+                "expanded": group.expanded,
+                "parent": group.parent,
+            }
+            for group in doc.groups
+        ],
         "layers": [
             {
                 "name": layer.name,
@@ -39,6 +52,7 @@ def save_project(doc: Document, path: str | Path, set_path: bool = True) -> bool
                 "lock_alpha": layer.lock_alpha,
                 "adjustment": layer.adjustment,
                 "styles": layer.styles,
+                "group_id": layer.group_id,
             }
             for index, layer in enumerate(doc.layers)
         ],
@@ -71,13 +85,34 @@ def load_project(path: str | Path, undo_budget: int = 400 * 1024 * 1024) -> Docu
             data = json.loads(archive.read("project.json").decode("utf-8"))
             width = int(data.get("width", 1))
             height = int(data.get("height", 1))
-            doc = Document(QSize(width, height), undo_budget=undo_budget,
+            doc = Document(QSize(width, height),
+                           undo_budget=document_undo_budget(width, height, undo_budget),
                            dpi=max(36, min(1200, int(data.get("dpi", 96)))))
+            group_ids: dict = {}
+            for entry in data.get("groups", []):
+                try:
+                    group = LayerGroup(str(entry.get("name") or "Groupe"))
+                    group.visible = bool(entry.get("visible", True))
+                    group.opacity = max(0.0, min(1.0, float(entry.get("opacity", 1.0))))
+                    blend = entry.get("blend", "normal")
+                    group.blend = blend if blend in BLEND else "normal"
+                    group.expanded = bool(entry.get("expanded", True))
+                    doc.groups.append(group)
+                    group_ids[entry.get("id")] = group
+                except (TypeError, ValueError):
+                    continue
+            for entry in data.get("groups", []):
+                group = group_ids.get(entry.get("id"))
+                if group is not None:
+                    parent = group_ids.get(entry.get("parent"))
+                    group.parent = parent.id if parent is not None else None
             for entry in data.get("layers", []):
                 image = png_bytes_to_image(archive.read(entry["file"]))
                 if image is None:
                     continue
                 layer = Layer(entry.get("name", "Calque"), QSize(width, height))
+                group = group_ids.get(entry.get("group_id"))
+                layer.group_id = group.id if group is not None else None
                 layer.image = image
                 layer.visible = bool(entry.get("visible", True))
                 layer.opacity = float(entry.get("opacity", 1.0))

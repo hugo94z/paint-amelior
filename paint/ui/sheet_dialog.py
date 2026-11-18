@@ -385,11 +385,12 @@ class SheetPreview(QWidget):
 
 class NewSheetDialog(QDialog):
     def __init__(self, parent, settings=None, width: int = 1600, height: int = 1000,
-                 dpi: int = 96):
+                 dpi: int = 96, budget_bytes: int | None = None):
         super().__init__(parent)
         self.setWindowTitle("Nouveau document")
         self.setMinimumWidth(520)
         self._settings = settings
+        self._budget = budget_bytes or 0
         self._custom = load_custom_sheets(settings)
         self._current_custom = -1
 
@@ -511,10 +512,14 @@ class NewSheetDialog(QDialog):
         need = estimate_bytes(width, height, layers)
         text = (f"{width} × {height} px • {self.size_widget.megapixels():.1f} Mpx • "
                 f"≈ {human_bytes(need)} pour {layers} calque(s)")
+        if self._budget:
+            text += f" / budget {human_bytes(self._budget)}"
         if width > MAX_SIDE or height > MAX_SIDE:
             text += f"\nLimite : {MAX_SIDE} px par côté."
         self.memory.setText(text)
-        if need > 768 * 1024 * 1024:
+        if self._budget and need > self._budget:
+            self.memory.setStyleSheet("color:#ef4444;")
+        elif need > 768 * 1024 * 1024:
             self.memory.setStyleSheet("color:#eab308;")
         else:
             self.memory.setStyleSheet("color:#7f858f;")

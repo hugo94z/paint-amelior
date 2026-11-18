@@ -7,9 +7,10 @@ import platform
 from pathlib import Path
 
 APP_NAME = "Paint Amélioré"
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.5"
 
 MB = 1024 * 1024
+ALLOCATION_VERSION = 3
 
 
 class _MemoryStatus(ctypes.Structure):
@@ -26,19 +27,34 @@ class _MemoryStatus(ctypes.Structure):
     ]
 
 
+def _memory_status() -> _MemoryStatus | None:
+    if os.name != "nt":
+        return None
+    status = _MemoryStatus()
+    status.dwLength = ctypes.sizeof(_MemoryStatus)
+    try:
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return status
+    except (AttributeError, OSError):
+        pass
+    return None
+
+
 def total_ram_mb() -> int:
-    if os.name == "nt":
-        status = _MemoryStatus()
-        status.dwLength = ctypes.sizeof(_MemoryStatus)
-        try:
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return int(status.ullTotalPhys // MB)
-        except (AttributeError, OSError):
-            pass
+    status = _memory_status()
+    if status is not None:
+        return int(status.ullTotalPhys // MB)
     try:
         return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // MB)
     except (ValueError, OSError, AttributeError):
         return 4096
+
+
+def available_ram_mb() -> int:
+    status = _memory_status()
+    if status is not None:
+        return int(status.ullAvailPhys // MB)
+    return int(total_ram_mb() * 0.65)
 
 
 def quick_detect() -> dict:
@@ -48,23 +64,56 @@ def quick_detect() -> dict:
         "physical_cores": max(1, logical // 2),
         "logical_cores": logical,
         "ram_total_mb": total_ram_mb(),
+        "ram_available_mb": available_ram_mb(),
         "gpu": "Inconnu",
     }
 
 
+def document_undo_budget(width: int, height: int, base: int) -> int:
+    surface = max(1, int(width)) * max(1, int(height)) * 4
+    return int(min(max(1, base), max(64 * MB, surface * 16)))
+
+
 def allocate(detected: dict) -> dict:
-    logical = max(1, int(detected.get("logical_cores") or os.cpu_count() or 4))
-    physical = max(1, int(detected.get("physical_cores") or logical))
-    ram_mb = max(1024, int(detected.get("ram_total_mb") or 4096))
-    threads = max(1, min(logical - 1 if logical > 1 else 1, physical * 2, 32))
-    app_ram_mb = int(min(max((ram_mb - 2048) * 0.5, 1024), 16384))
-    undo_mb = int(min(max(app_ram_mb * 0.35, 256), 4096))
-    stamp_mb = int(min(max(app_ram_mb * 0.03, 48), 512))
+    logical = max(1, min(128, int(detected.get("logical_cores") or os.cpu_count() or 4)))
+    physical = max(1, min(logical, int(detected.get("physical_cores") or 0) or logical // 2))
+    total = max(1024, int(detected.get("ram_total_mb") or 4096))
+    available_field = detected.get("ram_available_mb")
+    if available_field:
+        available = max(512, min(total, int(available_field)))
+        reserve = int(min(max(available * 0.15, 512), 4096))
+        usable = max(384, available - reserve)
+    else:
+        available = int(total * 0.65)
+        reserve = int(min(max(total * 0.22, 1024), 4096, max(512, total * 0.45)))
+        usable = max(384, total - reserve)
+    app_ram = int(min(max(usable * 0.6, 384), 24576, total * 0.62))
+    undo = int(min(max(app_ram * 0.38, 192), 8192, app_ram * 0.55))
+    stamp = int(min(max(app_ram * 0.05, 48), 1024, app_ram * 0.2))
+    doc_ram = int(min(max(app_ram * 0.6, 256), app_ram * 0.75))
+    max_pixels = int(doc_ram * MB / (4 * 3))
+
+    if logical <= 2:
+        threads = 1
+    elif physical >= 2:
+        threads = min(physical, max(1, logical - 1), 32)
+    else:
+        threads = min(max(1, logical - 1), 32)
+    threads = max(1, threads)
+
     return {
+        "allocation_version": ALLOCATION_VERSION,
         "threads": threads,
-        "app_ram_mb": app_ram_mb,
-        "undo_mb": undo_mb,
-        "stamp_cache_mb": stamp_mb,
+        "app_ram_mb": app_ram,
+        "undo_mb": undo,
+        "stamp_cache_mb": stamp,
+        "doc_ram_mb": doc_ram,
+        "reserve_mb": reserve,
+        "max_document_pixels": max_pixels,
+        "logical_cores": logical,
+        "physical_cores": physical,
+        "ram_total_mb": total,
+        "ram_available_mb": available,
     }
 
 
@@ -73,27 +122,45 @@ DEFAULT_DETECTED = {
     "physical_cores": 0,
     "logical_cores": os.cpu_count() or 4,
     "ram_total_mb": 4096,
+    "ram_available_mb": 2662,
     "gpu": "Inconnu",
 }
+
 
 class Settings:
     def __init__(self, data: dict | None, source: Path | None = None):
         data = data or {}
         detected = dict(DEFAULT_DETECTED)
         detected.update(data.get("detected") or {})
+        if not detected.get("ram_available_mb"):
+            detected["ram_available_mb"] = available_ram_mb()
         alloc = allocate(detected)
-        alloc.update(data.get("allocation") or {})
+        stored = data.get("allocation") or {}
+        try:
+            version = int(stored.get("allocation_version", 0))
+        except (TypeError, ValueError):
+            version = 0
+        if version >= ALLOCATION_VERSION:
+            alloc.update(stored)
         self.detected = detected
         self.allocation = alloc
         self.source = source
 
     @property
     def threads(self) -> int:
-        return int(self.allocation.get("threads", 4))
+        return max(1, int(self.allocation.get("threads", 4)))
 
     @property
     def app_ram_bytes(self) -> int:
         return int(self.allocation.get("app_ram_mb", 2048)) * MB
+
+    @property
+    def doc_ram_bytes(self) -> int:
+        return int(self.allocation.get("doc_ram_mb", 1024)) * MB
+
+    @property
+    def max_document_pixels(self) -> int:
+        return int(self.allocation.get("max_document_pixels", 100_000_000))
 
     @property
     def undo_budget_bytes(self) -> int:
@@ -111,19 +178,28 @@ class Settings:
     def ram_total_mb(self) -> int:
         return int(self.detected.get("ram_total_mb") or 0)
 
+    @property
+    def ram_available_mb(self) -> int:
+        return int(self.detected.get("ram_available_mb") or 0)
+
     def summary_lines(self) -> list[str]:
         d = self.detected
         a = self.allocation
         return [
             f"Processeur : {d.get('cpu_name')}",
             f"Cœurs physiques : {d.get('physical_cores')}  •  cœurs logiques : {d.get('logical_cores')}",
-            f"Mémoire vive : {int(d.get('ram_total_mb') or 0) / 1024:.1f} Go",
+            f"Mémoire vive : {int(d.get('ram_total_mb') or 0) / 1024:.1f} Go"
+            f"  •  disponible : {int(d.get('ram_available_mb') or 0) / 1024:.1f} Go",
             f"Carte graphique : {d.get('gpu')}",
             "",
+            f"Réserve système : {int(a.get('reserve_mb', 0))} Mo",
             f"Threads alloués à l'application : {a.get('threads')}",
             f"Mémoire allouée à l'application : {int(a.get('app_ram_mb', 0))} Mo",
+            f"Budget par document : {int(a.get('doc_ram_mb', 0))} Mo",
             f"Budget historique (annuler) : {int(a.get('undo_mb', 0))} Mo",
             f"Cache des pinceaux : {int(a.get('stamp_cache_mb', 0))} Mo",
+            f"Taille maximale conseillée (3 calques) : "
+            f"{int(a.get('max_document_pixels', 0)) / 1_000_000:.0f} Mpx",
             f"Fichier de configuration : {self.source or 'valeurs par défaut'}",
         ]
 

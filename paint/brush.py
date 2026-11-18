@@ -30,10 +30,13 @@ class StampCache:
         img = self._build(int(size), float(hardness), color)
         self._items[key] = img
         self._bytes += img.sizeInBytes()
+        self.trim()
+        return img
+
+    def trim(self) -> None:
         while self._items and (self._bytes > self.budget_bytes or len(self._items) > self.max_items):
             _, old = self._items.popitem(last=False)
             self._bytes -= old.sizeInBytes()
-        return img
 
     @staticmethod
     def _build(size: int, hardness: float, color: QColor) -> QImage:

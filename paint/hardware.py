@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import Settings, allocate, total_ram_mb
+from .config import Settings, allocate, available_ram_mb, total_ram_mb
 
 
 def _powershell_json(script: str):
@@ -64,6 +64,7 @@ def detect() -> dict:
         "physical_cores": cents["physical_cores"],
         "logical_cores": cents["logical_cores"],
         "ram_total_mb": total_ram_mb(),
+        "ram_available_mb": available_ram_mb(),
         "gpu": _gpu_name(),
     }
     return {"detected": detected, "allocation": allocate(detected)}

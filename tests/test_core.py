@@ -450,3 +450,86 @@ def test_clone_and_tone_tools(qapp):
     assert gray.image.pixelColor(2, 2).lightness() == 128
     doc2.history.undo()
     assert gray.image.pixelColor(40, 40).lightness() == 128
+
+
+def test_layer_groups_render_undo_and_roundtrip(qapp, tmp_path):
+    doc = Document.new(80, 80, QColor("white"))
+    doc.active_index = 0
+    fill_layer(doc.layers[0], QRect(0, 0, 80, 80), QColor("#ef4444"))
+    doc.invalidate_all()
+    group = doc.add_group("Groupe test", indices=[0])
+    assert doc.layers[0].group_id == group.id
+    doc.add_layer("Dans le groupe")
+    assert doc.active_layer().group_id == group.id
+    fill_layer(doc.active_layer(), QRect(20, 20, 30, 30), QColor("#2563eb"))
+    doc.invalidate_all()
+    assert doc.composite().pixelColor(30, 30).name() == "#2563eb"
+    doc.set_group_props(group.id, visible=False)
+    assert doc.composite().pixelColor(30, 30).alpha() == 0
+    doc.set_group_props(group.id, visible=True, opacity=0.5)
+    assert doc.composite().pixelColor(30, 30).alpha() < 255
+    doc.history.undo()
+    doc.history.undo()
+    assert doc.group_by_id(group.id).visible
+    assert abs(doc.group_by_id(group.id).opacity - 1.0) < 0.01
+    doc.history.undo()
+    assert len(doc.layers) == 2
+    doc.history.undo()
+    assert group.id not in {item.id for item in doc.groups}
+
+    group = doc.add_group("Groupe test", indices=[0])
+    doc.assign_to_group([doc.active_index], group.id)
+    path = tmp_path / "groups.paint"
+    assert save_project(doc, path, set_path=False)
+    loaded = load_project(path)
+    assert loaded is not None
+    assert len(loaded.groups) == 1
+    assert loaded.groups[0].name == "Groupe test"
+    assert loaded.layers[0].group_id == loaded.groups[0].id
+
+
+def test_nested_groups_and_tree_rebuild(qapp):
+    doc = Document.new(60, 60, QColor("white"))
+    doc.active_index = 0
+    outer = doc.add_group("Exterieur", indices=[0])
+    doc.add_layer("Calque haut")
+    inner = doc.add_group("Interieur", indices=[doc.active_index])
+    doc.set_group_props(inner.id, parent=outer.id)
+    assert doc.group_by_id(inner.id).parent == outer.id
+    assert set(doc.group_layer_indices(outer.id)) == {0, 1}
+    order = [layer.id for layer in reversed(doc.layers)]
+    memberships = {layer.id: layer.group_id for layer in doc.layers}
+    parents = {group.id: group.parent for group in doc.groups}
+    doc.rebuild_tree(order, memberships, parents)
+    assert len(doc.layers) == 3
+    assert doc.layers[0].group_id == outer.id
+    assert doc.layers[1].group_id == inner.id
+    doc.remove_group(outer.id, delete_layers=True)
+    assert not doc.groups
+    assert len(doc.layers) == 1
+
+
+def test_resource_allocation_scales(qapp):
+    from paint.config import Settings, allocate
+
+    low = allocate({"logical_cores": 4, "physical_cores": 2, "ram_total_mb": 4096,
+                    "ram_available_mb": 2000})
+    high = allocate({"logical_cores": 16, "physical_cores": 8, "ram_total_mb": 32768,
+                     "ram_available_mb": 20000})
+    assert high["app_ram_mb"] > low["app_ram_mb"]
+    assert high["undo_mb"] > low["undo_mb"]
+    assert high["doc_ram_mb"] > low["doc_ram_mb"]
+    assert 1 <= low["threads"] <= 4
+    assert 1 <= high["threads"] <= 8
+    assert high["max_document_pixels"] > low["max_document_pixels"]
+    legacy = Settings({"detected": {"logical_cores": 8, "physical_cores": 4,
+                                    "ram_total_mb": 8192},
+                       "allocation": {"threads": 3, "app_ram_mb": 2048}})
+    assert legacy.allocation["allocation_version"] >= 3
+    assert legacy.allocation["doc_ram_mb"] > 0
+    from paint.config import document_undo_budget
+
+    small = document_undo_budget(800, 600, 4_000_000_000)
+    large = document_undo_budget(8000, 6000, 4_000_000_000)
+    assert small >= 64 * 1024 * 1024
+    assert large > small

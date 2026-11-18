@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QLineEdit,
@@ -20,6 +20,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSpinBox,
+    QStyle,
+    QTreeWidget,
+    QTreeWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -39,29 +42,43 @@ PALETTE = [
 ]
 
 
+class LayerTree(QTreeWidget):
+    dropped = Signal()
+
+    def dropEvent(self, event) -> None:
+        super().dropEvent(event)
+        self.dropped.emit()
+
+
 class LayersDock(QDockWidget):
     def __init__(self, app):
         super().__init__("Calques")
         self.app = app
         self._guard = False
+        self._selected = None
         self.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
-        self.list = QListWidget()
-        self.list.setMinimumHeight(150)
-        self.list.setIconSize(QSize(46, 34))
-        self.list.setDragDropMode(QAbstractItemView.InternalMove)
-        self.list.setDefaultDropAction(Qt.MoveAction)
-        self.list.setDragEnabled(True)
-        self.list.setAcceptDrops(True)
-        self.list.setDropIndicatorShown(True)
-        self.list.itemChanged.connect(self._item_changed)
-        self.list.currentRowChanged.connect(self._row_changed)
-        self.list.itemDoubleClicked.connect(self._rename)
-        self.list.model().rowsMoved.connect(self._rows_moved)
-        layout.addWidget(self.list, 1)
+        self.tree = LayerTree()
+        self.tree.setMinimumHeight(170)
+        self.tree.setIconSize(QSize(46, 34))
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(16)
+        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree.setDefaultDropAction(Qt.MoveAction)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree.itemChanged.connect(self._item_changed)
+        self.tree.currentItemChanged.connect(self._current_changed)
+        self.tree.itemDoubleClicked.connect(self._rename)
+        self.tree.dropped.connect(self._tree_dropped)
+        self.tree.itemExpanded.connect(lambda item: self._expansion(item, True))
+        self.tree.itemCollapsed.connect(lambda item: self._expansion(item, False))
+        layout.addWidget(self.tree, 1)
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(QLabel("Opacité"))
         self.opacity = QSlider(Qt.Horizontal)
@@ -82,16 +99,17 @@ class LayersDock(QDockWidget):
         buttons.setSpacing(3)
         for text, tip, slot in (
             ("+", "Nouveau calque", self.app.action_new_layer.trigger),
+            ("▣", "Nouveau groupe depuis le calque actif", self._group_active),
             ("⧉", "Dupliquer le calque", self.app.action_duplicate_layer.trigger),
-            ("−", "Supprimer le calque", self.app.action_delete_layer.trigger),
-            ("↑", "Monter le calque", lambda: self._move(1)),
-            ("↓", "Descendre le calque", lambda: self._move(-1)),
+            ("−", "Supprimer", self.app.action_delete_layer.trigger),
+            ("↑", "Monter", lambda: self._move(1)),
+            ("↓", "Descendre", lambda: self._move(-1)),
             ("⤓", "Fusionner vers le bas", self.app.action_merge_layer.trigger),
         ):
             button = QToolButton()
             button.setText(text)
             button.setToolTip(tip)
-            button.setMinimumWidth(28)
+            button.setMinimumWidth(26)
             button.clicked.connect(slot)
             buttons.addWidget(button)
         layout.addLayout(buttons)
@@ -140,37 +158,134 @@ class LayersDock(QDockWidget):
         self.alpha_button.setToolTip("Verrouiller la transparence")
         self.alpha_button.toggled.connect(self._alpha_changed)
         extras.addWidget(self.alpha_button)
+        group_button = QToolButton()
+        group_button.setText("Groupe")
+        group_button.setToolTip("Grouper le calque actif / dissoudre le groupe sélectionné")
+        group_button.setPopupMode(QToolButton.MenuButtonPopup)
+        group_menu = QMenu(group_button)
+        group_menu.addAction("Grouper le calque actif", self._group_active)
+        group_menu.addAction("Nouveau groupe vide", self._new_group)
+        group_menu.addAction("Dissoudre le groupe", self._ungroup_selected)
+        group_menu.addAction("Supprimer le groupe et ses calques",
+                             lambda: self._remove_selected_group(delete_layers=True))
+        group_button.setMenu(group_menu)
+        group_button.clicked.connect(self._group_active)
+        extras.addWidget(group_button)
         layout.addLayout(extras)
         self.setWidget(container)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._context_menu)
         app.doc_changed.connect(self.refresh)
 
+    def _entry(self, item):
+        if item is None:
+            return None, None
+        data = item.data(0, Qt.UserRole)
+        if not isinstance(data, tuple) or len(data) != 2:
+            return None, None
+        return data[0], data[1]
+
     def refresh(self) -> None:
+        if self._guard:
+            return
         doc = self.app.doc
         self._guard = True
-        self.list.clear()
+        expanded = self._expanded_ids()
+        selected = self._selected
+        self.tree.clear()
         if doc is not None:
-            for index in range(len(doc.layers) - 1, -1, -1):
-                layer = doc.layers[index]
-                item = QListWidgetItem(layer.name)
-                item.setFlags(
-                    Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
-                    | Qt.ItemIsEditable | Qt.ItemIsDragEnabled
-                )
-                item.setCheckState(Qt.Checked if layer.visible else Qt.Unchecked)
-                item.setData(Qt.UserRole, layer.id)
-                item.setIcon(QIcon(self._thumbnail(layer)))
-                self.list.addItem(item)
-            if 0 <= doc.active_index < len(doc.layers):
-                self.list.setCurrentRow(len(doc.layers) - 1 - doc.active_index)
-                layer = doc.layers[doc.active_index]
-                self.opacity.setValue(int(round(layer.opacity * 100)))
-                self.opacity_label.setText(f"{int(round(layer.opacity * 100))} %")
-                idx = self.blend.findData(layer.blend)
-                self.blend.setCurrentIndex(max(0, idx))
-                self.lock_button.setChecked(layer.locked)
-                self.alpha_button.setChecked(layer.lock_alpha)
-                self.mask_button.setEnabled(True)
+            top = []
+            for group in doc.groups:
+                if group.parent is None:
+                    indices = doc.group_layer_indices(group.id)
+                    position = (max(indices) if indices
+                                else len(doc.layers) + 50 + doc.groups.index(group))
+                    top.append((position, 1, group))
+            for layer in doc.layers:
+                if layer.group_id is None:
+                    top.append((doc.layer_index(layer.id), 0, layer))
+            top.sort(key=lambda entry: (-entry[0], entry[1]))
+            for _, kind, obj in top:
+                if kind == 1:
+                    self._add_group_item(doc, obj, self.tree.invisibleRootItem(), expanded)
+                else:
+                    self._add_layer_item(doc, obj, self.tree.invisibleRootItem())
+        self.tree.expandAll()
+        if doc is not None and doc.groups:
+            for group in doc.groups:
+                item = self._find_item(("group", group.id))
+                if item is not None:
+                    item.setExpanded(group.expanded)
+        item = self._find_item(selected) if selected else None
+        if item is None and doc is not None and 0 <= doc.active_index < len(doc.layers):
+            item = self._find_item(("layer", doc.layers[doc.active_index].id))
+        if item is not None:
+            self.tree.setCurrentItem(item)
         self._guard = False
+        self._apply_selection_controls(item)
+
+    def _expanded_ids(self) -> set:
+        result = set()
+        doc = self.app.doc
+        if doc is not None:
+            for group in doc.groups:
+                if not group.expanded:
+                    result.add(group.id)
+        return result
+
+    def _find_item(self, key):
+        if not key:
+            return None
+        kind, value = key
+        stack = [self.tree.topLevelItem(index) for index in range(self.tree.topLevelItemCount())]
+        while stack:
+            item = stack.pop()
+            if item is None:
+                continue
+            item_kind, item_value = self._entry(item)
+            if item_kind == kind and item_value == value:
+                return item
+            stack.extend(item.child(index) for index in range(item.childCount()))
+        return None
+
+    def _add_layer_item(self, doc, layer, parent) -> None:
+        index = doc.layer_index(layer.id)
+        item = QTreeWidgetItem([layer.name])
+        flags = (Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
+                 | Qt.ItemIsEditable | Qt.ItemIsDragEnabled)
+        item.setFlags(flags)
+        item.setCheckState(0, Qt.Checked if layer.visible else Qt.Unchecked)
+        item.setData(0, Qt.UserRole, ("layer", layer.id))
+        item.setData(0, Qt.UserRole + 1, index)
+        item.setIcon(0, QIcon(self._thumbnail(layer)))
+        parent.addChild(item)
+
+    def _add_group_item(self, doc, group, parent, expanded: set) -> None:
+        item = QTreeWidgetItem([group.name])
+        flags = (Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
+                 | Qt.ItemIsEditable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
+        item.setFlags(flags)
+        item.setCheckState(0, Qt.Checked if group.visible else Qt.Unchecked)
+        item.setData(0, Qt.UserRole, ("group", group.id))
+        item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+        parent.addChild(item)
+        children = []
+        for layer in doc.layers:
+            if layer.group_id == group.id:
+                children.append((doc.layer_index(layer.id), 0, layer))
+        for child in doc.groups:
+            if child.parent == group.id:
+                indices = doc.group_layer_indices(child.id)
+                position = (max(indices) if indices
+                            else len(doc.layers) + 50 + doc.groups.index(child))
+                children.append((position, 1, child))
+        children.sort(key=lambda entry: (-entry[0], entry[1]))
+        for _, kind, obj in children:
+            if kind == 1:
+                self._add_group_item(doc, obj, item, expanded)
+            else:
+                self._add_layer_item(doc, obj, item)
+        item.setExpanded(group.expanded)
 
     @staticmethod
     def _thumbnail(layer) -> QPixmap:
@@ -183,21 +298,125 @@ class LayersDock(QDockWidget):
         painter.end()
         return QPixmap.fromImage(thumb)
 
-    def _rows_moved(self, parent, start, end, destination, row) -> None:
+    def _tree_dropped(self) -> None:
         if self._guard:
             return
-        ids = []
-        for index in range(self.list.count()):
-            value = self.list.item(index).data(Qt.UserRole)
-            if value is not None:
-                ids.append(int(value))
         doc = self.app.doc
-        if doc is not None and ids:
-            QTimer.singleShot(0, lambda: doc.reorder_layers(ids))
+        if doc is None:
+            return
+        order: list[int] = []
+        memberships: dict = {}
+        parents: dict = {}
 
-    def _doc_index(self, row: int) -> int:
+        def walk(item, parent_group) -> None:
+            kind, value = self._entry(item)
+            if kind == "group":
+                parents[value] = parent_group
+                for index in range(item.childCount()):
+                    walk(item.child(index), value)
+            elif kind == "layer":
+                order.append(value)
+                memberships[value] = parent_group
+
+        for index in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(index), None)
+        if not order:
+            return
+        self._guard = True
+        try:
+            doc.rebuild_tree(order, memberships, parents)
+        finally:
+            self._guard = False
+        self.refresh()
+
+    def _selected_target(self):
+        kind, value = self._entry(self.tree.currentItem())
         doc = self.app.doc
-        return len(doc.layers) - 1 - row if doc else -1
+        if doc is None:
+            return None, None
+        if kind == "group":
+            return "group", doc.group_by_id(value)
+        if kind == "layer" and 0 <= doc.active_index < len(doc.layers):
+            return "layer", doc.layers[doc.active_index]
+        return None, None
+
+    def _apply_selection_controls(self, item) -> None:
+        kind, _ = self._entry(item)
+        self._guard = True
+        if kind == "group":
+            group = self._selected_target()[1]
+            if group is not None:
+                self.opacity.setValue(int(round(group.opacity * 100)))
+                self.opacity_label.setText(f"{int(round(group.opacity * 100))} %")
+                self.blend.setCurrentIndex(max(0, self.blend.findData(group.blend)))
+        elif kind == "layer":
+            layer = self.app.doc.active_layer() if self.app.doc else None
+            if layer is not None:
+                self.opacity.setValue(int(round(layer.opacity * 100)))
+                self.opacity_label.setText(f"{int(round(layer.opacity * 100))} %")
+                self.blend.setCurrentIndex(max(0, self.blend.findData(layer.blend)))
+                self.lock_button.setChecked(layer.locked)
+                self.alpha_button.setChecked(layer.lock_alpha)
+        group_selected = kind == "group"
+        for widget in (self.mask_button, self.adjust_button, self.lock_button,
+                       self.alpha_button):
+            widget.setEnabled(not group_selected)
+        self._guard = False
+
+    def _expansion(self, item, expanded: bool) -> None:
+        if self._guard:
+            return
+        kind, value = self._entry(item)
+        doc = self.app.doc
+        if kind != "group" or doc is None:
+            return
+        self._guard = True
+        try:
+            doc.set_group_props(value, expanded=expanded)
+        finally:
+            self._guard = False
+
+    def _current_changed(self, current, previous) -> None:
+        if self._guard or current is None:
+            return
+        self._selected = self._entry(current)
+        kind, value = self._selected
+        doc = self.app.doc
+        if doc is None:
+            return
+        if kind == "layer":
+            index = doc.layer_index(value)
+            if index >= 0:
+                doc.set_active(index)
+        self._apply_selection_controls(current)
+
+    def _item_changed(self, item, column: int) -> None:
+        if self._guard:
+            return
+        kind, value = self._entry(item)
+        doc = self.app.doc
+        if doc is None or kind is None:
+            return
+        checked = item.checkState(0) == Qt.Checked
+        self._guard = True
+        try:
+            if kind == "layer":
+                index = doc.layer_index(value)
+                if index >= 0:
+                    layer = doc.layers[index]
+                    if layer.name != item.text(0):
+                        doc.set_layer_props(index, name=item.text(0))
+                    if layer.visible != checked:
+                        doc.set_layer_props(index, visible=checked)
+            else:
+                group = doc.group_by_id(value)
+                if group is not None:
+                    if group.name != item.text(0):
+                        doc.set_group_props(value, name=item.text(0))
+                    if group.visible != checked:
+                        doc.set_group_props(value, visible=checked)
+        finally:
+            self._guard = False
 
     def _toggle_mask(self) -> None:
         doc = self.app.doc
@@ -205,16 +424,23 @@ class LayersDock(QDockWidget):
             return
         layer = doc.active_layer()
         if layer is not None and layer.mask is not None:
-            doc.set_layer_props(doc.active_index, mask_enabled=not layer.mask_enabled)
+            self._guard = True
+            try:
+                doc.set_layer_props(doc.active_index, mask_enabled=not layer.mask_enabled)
+            finally:
+                self._guard = False
 
     def _add_adjustment(self, kind: str, value: float) -> None:
         doc = self.app.doc
         if doc is not None:
-            doc.add_adjustment_layer(kind, value)
+            self._guard = True
+            try:
+                doc.add_adjustment_layer(kind, value)
+            finally:
+                self._guard = False
+            self.refresh()
 
     def _edit_adjustment(self) -> None:
-        from PySide6.QtWidgets import QInputDialog
-
         doc = self.app.doc
         if doc is None:
             return
@@ -242,64 +468,166 @@ class LayersDock(QDockWidget):
             return
         doc = self.app.doc
         if doc is not None:
-            doc.set_layer_props(doc.active_index, locked=value)
+            self._guard = True
+            try:
+                doc.set_layer_props(doc.active_index, locked=value)
+            finally:
+                self._guard = False
 
     def _alpha_changed(self, value: bool) -> None:
         if self._guard:
             return
         doc = self.app.doc
         if doc is not None:
-            doc.set_layer_props(doc.active_index, lock_alpha=value)
-
-    def _row_changed(self, row: int) -> None:
-        if self._guard or row < 0:
-            return
-        index = self._doc_index(row)
-        if index >= 0:
-            self.app.doc.set_active(index)
-            layer = self.app.doc.layers[index]
             self._guard = True
-            self.opacity.setValue(int(round(layer.opacity * 100)))
-            self.opacity_label.setText(f"{int(round(layer.opacity * 100))} %")
-            idx = self.blend.findData(layer.blend)
-            self.blend.setCurrentIndex(max(0, idx))
-            self._guard = False
-
-    def _item_changed(self, item: QListWidgetItem) -> None:
-        if self._guard:
-            return
-        row = self.list.row(item)
-        index = self._doc_index(row)
-        if index >= 0:
-            doc = self.app.doc
-            doc.set_layer_props(index, visible=item.checkState() == Qt.Checked)
+            try:
+                doc.set_layer_props(doc.active_index, lock_alpha=value)
+            finally:
+                self._guard = False
 
     def _opacity_changed(self, value: int) -> None:
         self.opacity_label.setText(f"{value} %")
         if self._guard:
             return
         doc = self.app.doc
+        if doc is None:
+            return
+        kind, target = self._selected_target()
         self._guard = True
-        doc.set_layer_props(doc.active_index, opacity=value / 100.0)
-        self._guard = False
+        try:
+            if kind == "group" and target is not None:
+                doc.set_group_props(target.id, opacity=value / 100.0)
+            elif kind == "layer":
+                doc.set_layer_props(doc.active_index, opacity=value / 100.0)
+        finally:
+            self._guard = False
 
     def _blend_changed(self, index: int) -> None:
         if self._guard:
             return
         doc = self.app.doc
+        if doc is None:
+            return
+        kind, target = self._selected_target()
         self._guard = True
-        doc.set_layer_props(doc.active_index, blend=self.blend.itemData(index))
-        self._guard = False
+        try:
+            if kind == "group" and target is not None:
+                doc.set_group_props(target.id, blend=self.blend.itemData(index))
+            elif kind == "layer":
+                doc.set_layer_props(doc.active_index, blend=self.blend.itemData(index))
+        finally:
+            self._guard = False
 
     def _move(self, delta: int) -> None:
         doc = self.app.doc
         if doc is not None:
-            doc.move_layer(doc.active_index, delta)
+            self._guard = True
+            try:
+                doc.move_layer(doc.active_index, delta)
+            finally:
+                self._guard = False
+            self.refresh()
 
-    def _rename(self, item: QListWidgetItem) -> None:
-        index = self._doc_index(self.list.row(item))
-        if index >= 0:
-            self.app.doc.set_layer_props(index, name=item.text())
+    def _rename(self, item, column: int) -> None:
+        kind, value = self._entry(item)
+        doc = self.app.doc
+        if doc is None or kind is None:
+            return
+        name = item.text(0)
+        self._guard = True
+        try:
+            if kind == "layer":
+                index = doc.layer_index(value)
+                if index >= 0:
+                    doc.set_layer_props(index, name=name)
+            else:
+                doc.set_group_props(value, name=name)
+        finally:
+            self._guard = False
+
+    def _group_active(self) -> None:
+        doc = self.app.doc
+        if doc is None:
+            return
+        index = doc.active_index
+        layer = doc.active_layer()
+        if layer is None:
+            return
+        if layer.group_id is not None:
+            group = doc.group_by_id(layer.group_id)
+            if group is not None:
+                self.app.notify(f"Calque déjà dans « {group.name} »")
+                return
+        self._guard = True
+        try:
+            doc.add_group(indices=[index])
+        finally:
+            self._guard = False
+        self.refresh()
+
+    def _new_group(self) -> None:
+        doc = self.app.doc
+        if doc is None:
+            return
+        self._guard = True
+        try:
+            doc.add_group(indices=[])
+        finally:
+            self._guard = False
+        self.refresh()
+
+    def _ungroup_selected(self) -> None:
+        kind, value = self._entry(self.tree.currentItem())
+        doc = self.app.doc
+        if doc is None:
+            return
+        if kind == "group" and doc.group_by_id(value) is not None:
+            self._guard = True
+            try:
+                doc.remove_group(value, delete_layers=False)
+            finally:
+                self._guard = False
+            self.refresh()
+        else:
+            self.app.notify("Sélectionnez un groupe")
+
+    def _remove_selected_group(self, delete_layers: bool = False) -> None:
+        kind, value = self._entry(self.tree.currentItem())
+        doc = self.app.doc
+        if doc is None:
+            return
+        if kind == "group" and doc.group_by_id(value) is not None:
+            self._guard = True
+            try:
+                doc.remove_group(value, delete_layers=delete_layers)
+            finally:
+                self._guard = False
+            self.refresh()
+        else:
+            self.app.notify("Sélectionnez un groupe")
+
+    def _context_menu(self, position) -> None:
+        item = self.tree.itemAt(position)
+        kind, value = self._entry(item)
+        doc = self.app.doc
+        if doc is None or kind is None:
+            return
+        menu = QMenu(self)
+        if kind == "group":
+            menu.addAction("Renommer", lambda: self.tree.editItem(item, 0))
+            menu.addAction("Dissoudre le groupe", self._ungroup_selected)
+            menu.addAction("Supprimer le groupe et ses calques",
+                           lambda: self._remove_selected_group(delete_layers=True))
+        else:
+            menu.addAction("Renommer", lambda: self.tree.editItem(item, 0))
+            menu.addAction("Grouper ce calque", self._group_active)
+            if doc.group_by_id(doc.layers[doc.active_index].group_id
+                               if 0 <= doc.active_index < len(doc.layers) else None):
+                menu.addAction("Retirer du groupe",
+                               lambda: doc.assign_to_group([doc.active_index], None) or self.refresh())
+            menu.addSeparator()
+            menu.addAction("Supprimer le calque", self.app.action_delete_layer.trigger)
+        menu.exec(self.tree.viewport().mapToGlobal(position))
 
 
 class HistoryDock(QDockWidget):

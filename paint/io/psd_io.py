@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QImage, QPainter
 
+from ..config import document_undo_budget
 from ..document import Document
 from ..layer import Layer
 
@@ -49,7 +50,8 @@ def load_psd_document(path: str | Path, undo_budget: int = 400 * 1024 * 1024,
     width, height = psd.size
     if width < 1 or height < 1 or width > max_side or height > max_side:
         return None
-    doc = Document(QSize(width, height), undo_budget=undo_budget)
+    doc = Document(QSize(width, height),
+                   undo_budget=document_undo_budget(width, height, undo_budget))
     added = 0
 
     def add_node(node, prefix: str = "") -> None:
